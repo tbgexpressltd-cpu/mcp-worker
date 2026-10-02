@@ -4,7 +4,12 @@ import { z } from "zod";
 
 type Env = {
   META_ACCESS_TOKEN: string;
+
+  // IMPORTANT:
+  // This secret now contains the permanent Meta SYSTEM USER token.
+  // The Worker uses it to retrieve the actual Facebook Page Access Token.
   FACEBOOK_PAGE_ACCESS_TOKEN: string;
+
   SOCIAL_MEDIA: R2Bucket;
 };
 
@@ -17,7 +22,8 @@ const INSTAGRAM_GRAPH =
 const FACEBOOK_GRAPH =
   `https://graph.facebook.com/${FACEBOOK_API_VERSION}`;
 
-const FACEBOOK_PAGE_ID = "142334438953384";
+const FACEBOOK_PAGE_ID =
+  "142334438953384";
 
 const PUBLIC_WORKER_BASE =
   "https://mcp-worker.tbgexpressltd.workers.dev";
@@ -77,7 +83,8 @@ function safeFileName(
     safe += extensionFromMime(mime);
   }
 
-  return safe || `media${extensionFromMime(mime)}`;
+  return safe ||
+    `media${extensionFromMime(mime)}`;
 }
 
 
@@ -91,9 +98,10 @@ async function graphGet(
   path: string,
   params: Record<string, string> = {}
 ) {
-  const url = new URL(
-    `${baseUrl}/${path.replace(/^\/+/, "")}`
-  );
+  const url =
+    new URL(
+      `${baseUrl}/${path.replace(/^\/+/, "")}`
+    );
 
   for (
     const [key, value]
@@ -110,6 +118,7 @@ async function graphGet(
       url.toString(),
       {
         method: "GET",
+
         headers: {
           Authorization:
             `Bearer ${token}`
@@ -122,11 +131,15 @@ async function graphGet(
 
   if (!response.ok) {
     const message =
-      (data as any)?.error?.message
+      (data as any)
+        ?.error
+        ?.message
       ??
       `Meta API GET failed with HTTP ${response.status}`;
 
-    throw new Error(message);
+    throw new Error(
+      message
+    );
   }
 
   return data;
@@ -166,11 +179,15 @@ async function graphPost(
 
   if (!response.ok) {
     const message =
-      (data as any)?.error?.message
+      (data as any)
+        ?.error
+        ?.message
       ??
       `Meta API POST failed with HTTP ${response.status}`;
 
-    throw new Error(message);
+    throw new Error(
+      message
+    );
   }
 
   return data;
@@ -213,7 +230,8 @@ async function graphPostForm(
             "application/x-www-form-urlencoded"
         },
 
-        body: form
+        body:
+          form
       }
     );
 
@@ -222,16 +240,24 @@ async function graphPostForm(
 
   if (!response.ok) {
     const message =
-      (data as any)?.error?.message
+      (data as any)
+        ?.error
+        ?.message
       ??
       `Meta API POST failed with HTTP ${response.status}`;
 
-    throw new Error(message);
+    throw new Error(
+      message
+    );
   }
 
   return data;
 }
 
+
+// ======================================================
+// INSTAGRAM AUTH
+// ======================================================
 
 async function getInstagramUserId(
   env: Env
@@ -242,7 +268,8 @@ async function getInstagramUserId(
       env.META_ACCESS_TOKEN,
       "me",
       {
-        fields: "id"
+        fields:
+          "id"
       }
     )) as {
       id?: string;
@@ -258,6 +285,74 @@ async function getInstagramUserId(
 }
 
 
+// ======================================================
+// FACEBOOK AUTH
+//
+// FACEBOOK_PAGE_ACCESS_TOKEN contains our permanent
+// System User token.
+//
+// Meta's documented Pages API flow is:
+//
+// System User token
+//      ↓
+// GET /me/accounts
+//      ↓
+// Page Access Token
+//      ↓
+// /feed, /posts, /photos, /video_reels etc.
+// ======================================================
+
+async function getFacebookPageAccessToken(
+  env: Env
+) {
+  const accounts =
+    (await graphGet(
+      FACEBOOK_GRAPH,
+      env.FACEBOOK_PAGE_ACCESS_TOKEN,
+      "me/accounts",
+      {
+        fields:
+          "id,name,access_token,tasks",
+
+        limit:
+          "100"
+      }
+    )) as {
+      data?: Array<{
+        id?: string;
+        name?: string;
+        access_token?: string;
+        tasks?: string[];
+      }>;
+    };
+
+  const page =
+    accounts.data?.find(
+      item =>
+        item.id ===
+        FACEBOOK_PAGE_ID
+    );
+
+  if (!page) {
+    throw new Error(
+      `Facebook Page ${FACEBOOK_PAGE_ID} is not assigned to the System User.`
+    );
+  }
+
+  if (!page.access_token) {
+    throw new Error(
+      `Meta did not return a Page Access Token for Facebook Page ${FACEBOOK_PAGE_ID}.`
+    );
+  }
+
+  return page.access_token;
+}
+
+
+// ======================================================
+// MCP RESPONSE HELPERS
+// ======================================================
+
 function result(
   data: unknown
 ) {
@@ -265,6 +360,7 @@ function result(
     content: [
       {
         type: "text" as const,
+
         text:
           JSON.stringify(
             data,
@@ -307,8 +403,11 @@ function createServer(
 ) {
   const server =
     new McpServer({
-      name: "TBG Motors Social",
-      version: "1.4.0"
+      name:
+        "TBG Motors Social",
+
+      version:
+        "1.4.1"
     });
 
 
@@ -318,6 +417,7 @@ function createServer(
 
   server.registerTool(
     "upload_social_media",
+
     ({
       title:
         "Upload social media files",
@@ -335,9 +435,14 @@ function createServer(
       },
 
       annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        openWorldHint: true
+        readOnlyHint:
+          false,
+
+        destructiveHint:
+          false,
+
+        openWorldHint:
+          true
       },
 
       _meta: {
@@ -345,13 +450,15 @@ function createServer(
           "files"
         ]
       }
+
     } as any),
 
     async (
       {
         files
       }: {
-        files: OpenAIFile[];
+        files:
+          OpenAIFile[];
       }
     ) => {
       try {
@@ -402,9 +509,12 @@ function createServer(
               response.body,
               {
                 httpMetadata: {
-                  contentType: mime,
+                  contentType:
+                    mime,
+
                   contentDisposition:
                     "inline",
+
                   cacheControl:
                     "public, max-age=3600"
                 },
@@ -412,7 +522,8 @@ function createServer(
                 customMetadata: {
                   originalName:
                     file.file_name
-                    ?? name,
+                    ??
+                    name,
 
                   chatgptFileId:
                     file.file_id
@@ -420,20 +531,19 @@ function createServer(
               }
             );
 
-          if (!stored) {
-            throw new Error(
-              `R2 failed to store ${name}`
-            );
-          }
-
           uploaded.push({
             key,
+
             file_name:
               file.file_name
-              ?? name,
+              ??
+              name,
 
-            mime_type: mime,
-            size: stored.size,
+            mime_type:
+              mime,
+
+            size:
+              stored.size,
 
             url:
               `${PUBLIC_WORKER_BASE}/media/${encodeURIComponent(key)}`
@@ -445,7 +555,9 @@ function createServer(
         });
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -453,6 +565,7 @@ function createServer(
 
   server.registerTool(
     "delete_social_media_files",
+
     {
       description:
         "Delete temporary TBG Motors social-media files from R2 storage after they are no longer required.",
@@ -460,31 +573,42 @@ function createServer(
       inputSchema: {
         keys:
           z.array(
-            z.string().min(1)
+            z.string()
+              .min(1)
           )
           .min(1)
           .max(20)
       },
 
       annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        openWorldHint: false
+        readOnlyHint:
+          false,
+
+        destructiveHint:
+          true,
+
+        openWorldHint:
+          false
       }
     },
 
-    async ({ keys }) => {
+    async ({
+      keys
+    }) => {
       try {
         await env.SOCIAL_MEDIA.delete(
           keys
         );
 
         return result({
-          deleted: keys
+          deleted:
+            keys
         });
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -496,14 +620,17 @@ function createServer(
 
   server.registerTool(
     "get_instagram_profile",
+
     {
       description:
         "Get the connected TBG Motors Instagram Business profile. Read-only.",
 
-      inputSchema: {},
+      inputSchema:
+        {},
 
       annotations: {
-        readOnlyHint: true
+        readOnlyHint:
+          true
       }
     },
 
@@ -522,7 +649,9 @@ function createServer(
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -530,6 +659,7 @@ function createServer(
 
   server.registerTool(
     "list_instagram_media",
+
     {
       description:
         "List recent TBG Motors Instagram posts, Reels and carousel albums. Read-only.",
@@ -544,11 +674,14 @@ function createServer(
       },
 
       annotations: {
-        readOnlyHint: true
+        readOnlyHint:
+          true
       }
     },
 
-    async ({ limit }) => {
+    async ({
+      limit
+    }) => {
       try {
         return result(
           await graphGet(
@@ -561,14 +694,18 @@ function createServer(
 
               limit:
                 String(
-                  limit ?? 10
+                  limit
+                  ??
+                  10
                 )
             }
           )
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -576,21 +713,26 @@ function createServer(
 
   server.registerTool(
     "get_instagram_media",
+
     {
       description:
         "Get one Instagram post, Reel or carousel by media ID. Read-only.",
 
       inputSchema: {
         media_id:
-          z.string().min(1)
+          z.string()
+            .min(1)
       },
 
       annotations: {
-        readOnlyHint: true
+        readOnlyHint:
+          true
       }
     },
 
-    async ({ media_id }) => {
+    async ({
+      media_id
+    }) => {
       try {
         return result(
           await graphGet(
@@ -605,7 +747,9 @@ function createServer(
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -613,13 +757,15 @@ function createServer(
 
   server.registerTool(
     "list_instagram_comments",
+
     {
       description:
         "List comments on a TBG Motors Instagram post or Reel. Read-only.",
 
       inputSchema: {
         media_id:
-          z.string().min(1),
+          z.string()
+            .min(1),
 
         limit:
           z.number()
@@ -630,7 +776,8 @@ function createServer(
       },
 
       annotations: {
-        readOnlyHint: true
+        readOnlyHint:
+          true
       }
     },
 
@@ -650,14 +797,18 @@ function createServer(
 
               limit:
                 String(
-                  limit ?? 20
+                  limit
+                  ??
+                  20
                 )
             }
           )
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -669,13 +820,15 @@ function createServer(
 
   server.registerTool(
     "create_instagram_photo_container",
+
     {
       description:
         "Prepare an Instagram photo post for TBG Motors. This does NOT publish it. image_url should normally be an R2 /media URL returned by upload_social_media.",
 
       inputSchema: {
         image_url:
-          z.string().url(),
+          z.string()
+            .url(),
 
         caption:
           z.string()
@@ -706,7 +859,10 @@ function createServer(
           );
 
         const body:
-          Record<string, unknown> = {
+          Record<
+            string,
+            unknown
+          > = {
             image_url
           };
 
@@ -722,7 +878,8 @@ function createServer(
 
         if (
           is_ai_generated
-          !== undefined
+          !==
+          undefined
         ) {
           body.is_ai_generated =
             is_ai_generated;
@@ -738,7 +895,9 @@ function createServer(
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -750,13 +909,15 @@ function createServer(
 
   server.registerTool(
     "create_instagram_reel_container",
+
     {
       description:
         "Prepare an Instagram Reel for TBG Motors. This does NOT publish it. video_url should normally be an R2 /media URL returned by upload_social_media.",
 
       inputSchema: {
         video_url:
-          z.string().url(),
+          z.string()
+            .url(),
 
         caption:
           z.string()
@@ -797,7 +958,10 @@ function createServer(
           );
 
         const body:
-          Record<string, unknown> = {
+          Record<
+            string,
+            unknown
+          > = {
             media_type:
               "REELS",
 
@@ -816,7 +980,8 @@ function createServer(
 
         if (
           share_to_feed
-          !== undefined
+          !==
+          undefined
         ) {
           body.share_to_feed =
             share_to_feed;
@@ -829,7 +994,8 @@ function createServer(
 
         if (
           is_ai_generated
-          !== undefined
+          !==
+          undefined
         ) {
           body.is_ai_generated =
             is_ai_generated;
@@ -845,7 +1011,9 @@ function createServer(
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -857,6 +1025,7 @@ function createServer(
 
   server.registerTool(
     "create_instagram_carousel_container",
+
     {
       description:
         "Prepare an Instagram carousel for TBG Motors using 2 to 10 public R2 image/video URLs. This does NOT publish it.",
@@ -872,7 +1041,8 @@ function createServer(
                 ]),
 
               url:
-                z.string().url(),
+                z.string()
+                  .url(),
 
               alt_text:
                 z.string()
@@ -906,21 +1076,26 @@ function createServer(
           );
 
         const childIds:
-          string[] = [];
+          string[] =
+          [];
 
         for (
           const item
           of items
         ) {
           const childBody:
-            Record<string, unknown> = {
+            Record<
+              string,
+              unknown
+            > = {
               is_carousel_item:
                 true
             };
 
           if (
             item.type
-            === "IMAGE"
+            ===
+            "IMAGE"
           ) {
             childBody.image_url =
               item.url;
@@ -962,7 +1137,10 @@ function createServer(
         }
 
         const parentBody:
-          Record<string, unknown> = {
+          Record<
+            string,
+            unknown
+          > = {
             media_type:
               "CAROUSEL",
 
@@ -977,7 +1155,8 @@ function createServer(
 
         if (
           is_ai_generated
-          !== undefined
+          !==
+          undefined
         ) {
           parentBody.is_ai_generated =
             is_ai_generated;
@@ -1000,7 +1179,9 @@ function createServer(
         });
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -1008,17 +1189,20 @@ function createServer(
 
   server.registerTool(
     "check_instagram_container",
+
     {
       description:
         "Check whether an Instagram media container is ready to publish. Read-only.",
 
       inputSchema: {
         container_id:
-          z.string().min(1)
+          z.string()
+            .min(1)
       },
 
       annotations: {
-        readOnlyHint: true
+        readOnlyHint:
+          true
       }
     },
 
@@ -1039,7 +1223,9 @@ function createServer(
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -1047,13 +1233,15 @@ function createServer(
 
   server.registerTool(
     "publish_instagram_media",
+
     {
       description:
         "FINAL PUBLICATION ACTION. Publish a prepared Instagram photo, Reel or carousel to the public TBG Motors Instagram account. Only use after explicit user approval.",
 
       inputSchema: {
         creation_id:
-          z.string().min(1)
+          z.string()
+            .min(1)
       }
     },
 
@@ -1078,7 +1266,9 @@ function createServer(
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -1090,23 +1280,31 @@ function createServer(
 
   server.registerTool(
     "get_facebook_page",
+
     {
       description:
         "Get the TBG Motors Facebook Page profile. Read-only.",
 
-      inputSchema: {},
+      inputSchema:
+        {},
 
       annotations: {
-        readOnlyHint: true
+        readOnlyHint:
+          true
       }
     },
 
     async () => {
       try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
         return result(
           await graphGet(
             FACEBOOK_GRAPH,
-            env.FACEBOOK_PAGE_ACCESS_TOKEN,
+            pageToken,
             FACEBOOK_PAGE_ID,
             {
               fields:
@@ -1116,7 +1314,9 @@ function createServer(
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -1124,6 +1324,7 @@ function createServer(
 
   server.registerTool(
     "list_facebook_posts",
+
     {
       description:
         "List recent posts published by the TBG Motors Facebook Page. Read-only.",
@@ -1138,7 +1339,8 @@ function createServer(
       },
 
       annotations: {
-        readOnlyHint: true
+        readOnlyHint:
+          true
       }
     },
 
@@ -1146,10 +1348,15 @@ function createServer(
       limit
     }) => {
       try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
         return result(
           await graphGet(
             FACEBOOK_GRAPH,
-            env.FACEBOOK_PAGE_ACCESS_TOKEN,
+            pageToken,
             `${FACEBOOK_PAGE_ID}/posts`,
             {
               fields:
@@ -1157,14 +1364,18 @@ function createServer(
 
               limit:
                 String(
-                  limit ?? 10
+                  limit
+                  ??
+                  10
                 )
             }
           )
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -1172,17 +1383,20 @@ function createServer(
 
   server.registerTool(
     "get_facebook_post",
+
     {
       description:
         "Get one TBG Motors Facebook Page post by post ID. Read-only.",
 
       inputSchema: {
         post_id:
-          z.string().min(1)
+          z.string()
+            .min(1)
       },
 
       annotations: {
-        readOnlyHint: true
+        readOnlyHint:
+          true
       }
     },
 
@@ -1190,10 +1404,15 @@ function createServer(
       post_id
     }) => {
       try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
         return result(
           await graphGet(
             FACEBOOK_GRAPH,
-            env.FACEBOOK_PAGE_ACCESS_TOKEN,
+            pageToken,
             post_id,
             {
               fields:
@@ -1203,7 +1422,9 @@ function createServer(
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -1215,13 +1436,15 @@ function createServer(
 
   server.registerTool(
     "create_facebook_photo_upload",
+
     {
       description:
         "Upload a photo to the TBG Motors Facebook Page as unpublished media. This does NOT create a public post.",
 
       inputSchema: {
         image_url:
-          z.string().url()
+          z.string()
+            .url()
       }
     },
 
@@ -1229,10 +1452,15 @@ function createServer(
       image_url
     }) => {
       try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
         return result(
           await graphPost(
             FACEBOOK_GRAPH,
-            env.FACEBOOK_PAGE_ACCESS_TOKEN,
+            pageToken,
             `${FACEBOOK_PAGE_ID}/photos`,
             {
               url:
@@ -1245,7 +1473,9 @@ function createServer(
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -1257,6 +1487,7 @@ function createServer(
 
   server.registerTool(
     "publish_facebook_photo_post",
+
     {
       description:
         "FINAL PUBLICATION ACTION. Publish 1 to 10 previously prepared Facebook photos as a TBG Motors Page post. Only use after explicit user approval.",
@@ -1264,7 +1495,8 @@ function createServer(
       inputSchema: {
         photo_ids:
           z.array(
-            z.string().min(1)
+            z.string()
+              .min(1)
           )
           .min(1)
           .max(10),
@@ -1280,9 +1512,16 @@ function createServer(
       message
     }) => {
       try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
         const form:
-          Record<string, string> =
-          {};
+          Record<
+            string,
+            string
+          > = {};
 
         if (message) {
           form.message =
@@ -1307,32 +1546,36 @@ function createServer(
         return result(
           await graphPostForm(
             FACEBOOK_GRAPH,
-            env.FACEBOOK_PAGE_ACCESS_TOKEN,
+            pageToken,
             `${FACEBOOK_PAGE_ID}/feed`,
             form
           )
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
 
 
   // ====================================================
-  // FACEBOOK — TEXT/LINK
+  // FACEBOOK — TEXT / LINK
   // ====================================================
 
   server.registerTool(
     "publish_facebook_text_post",
+
     {
       description:
         "FINAL PUBLICATION ACTION. Publish a text or link post to the public TBG Motors Facebook Page. Only use after explicit user approval.",
 
       inputSchema: {
         message:
-          z.string().min(1),
+          z.string()
+            .min(1),
 
         link:
           z.string()
@@ -1346,8 +1589,16 @@ function createServer(
       link
     }) => {
       try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
         const body:
-          Record<string, unknown> = {
+          Record<
+            string,
+            unknown
+          > = {
             message,
             published:
               true
@@ -1361,14 +1612,16 @@ function createServer(
         return result(
           await graphPost(
             FACEBOOK_GRAPH,
-            env.FACEBOOK_PAGE_ACCESS_TOKEN,
+            pageToken,
             `${FACEBOOK_PAGE_ID}/feed`,
             body
           )
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -1380,13 +1633,15 @@ function createServer(
 
   server.registerTool(
     "create_facebook_reel_upload",
+
     {
       description:
         "Prepare and upload a Facebook Reel for TBG Motors from a public HTTPS video URL. This does NOT publish it.",
 
       inputSchema: {
         video_url:
-          z.string().url()
+          z.string()
+            .url()
       }
     },
 
@@ -1394,10 +1649,15 @@ function createServer(
       video_url
     }) => {
       try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
         const start =
           (await graphPost(
             FACEBOOK_GRAPH,
-            env.FACEBOOK_PAGE_ACCESS_TOKEN,
+            pageToken,
             `${FACEBOOK_PAGE_ID}/video_reels`,
             {
               upload_phase:
@@ -1427,7 +1687,7 @@ function createServer(
 
               headers: {
                 Authorization:
-                  `OAuth ${env.FACEBOOK_PAGE_ACCESS_TOKEN}`,
+                  `OAuth ${pageToken}`,
 
                 file_url:
                   video_url
@@ -1462,7 +1722,9 @@ function createServer(
         });
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -1470,17 +1732,20 @@ function createServer(
 
   server.registerTool(
     "check_facebook_reel",
+
     {
       description:
         "Check processing status of a prepared Facebook Reel. Read-only.",
 
       inputSchema: {
         video_id:
-          z.string().min(1)
+          z.string()
+            .min(1)
       },
 
       annotations: {
-        readOnlyHint: true
+        readOnlyHint:
+          true
       }
     },
 
@@ -1488,10 +1753,15 @@ function createServer(
       video_id
     }) => {
       try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
         return result(
           await graphGet(
             FACEBOOK_GRAPH,
-            env.FACEBOOK_PAGE_ACCESS_TOKEN,
+            pageToken,
             video_id,
             {
               fields:
@@ -1501,7 +1771,9 @@ function createServer(
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -1509,13 +1781,15 @@ function createServer(
 
   server.registerTool(
     "publish_facebook_reel",
+
     {
       description:
         "FINAL PUBLICATION ACTION. Publish a previously uploaded Facebook Reel to the public TBG Motors Facebook Page. Only use after explicit user approval.",
 
       inputSchema: {
         video_id:
-          z.string().min(1),
+          z.string()
+            .min(1),
 
         description:
           z.string()
@@ -1533,8 +1807,16 @@ function createServer(
       title
     }) => {
       try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
         const body:
-          Record<string, unknown> = {
+          Record<
+            string,
+            unknown
+          > = {
             video_id,
 
             upload_phase:
@@ -1557,14 +1839,16 @@ function createServer(
         return result(
           await graphPost(
             FACEBOOK_GRAPH,
-            env.FACEBOOK_PAGE_ACCESS_TOKEN,
+            pageToken,
             `${FACEBOOK_PAGE_ID}/video_reels`,
             body
           )
         );
 
       } catch (error) {
-        return errorResult(error);
+        return errorResult(
+          error
+        );
       }
     }
   );
@@ -1598,7 +1882,8 @@ async function serveMedia(
     return new Response(
       "Missing media key",
       {
-        status: 400
+        status:
+          400
       }
     );
   }
@@ -1611,7 +1896,8 @@ async function serveMedia(
 
   if (
     request.method
-    === "HEAD"
+    ===
+    "HEAD"
   ) {
     const object =
       await env.SOCIAL_MEDIA.head(
@@ -1622,7 +1908,8 @@ async function serveMedia(
       return new Response(
         null,
         {
-          status: 404
+          status:
+            404
         }
       );
     }
@@ -1654,7 +1941,9 @@ async function serveMedia(
     return new Response(
       null,
       {
-        status: 200,
+        status:
+          200,
+
         headers
       }
     );
@@ -1663,12 +1952,15 @@ async function serveMedia(
 
   if (
     request.method
-    !== "GET"
+    !==
+    "GET"
   ) {
     return new Response(
       "Method Not Allowed",
       {
-        status: 405,
+        status:
+          405,
+
         headers: {
           Allow:
             "GET, HEAD"
@@ -1695,7 +1987,8 @@ async function serveMedia(
     return new Response(
       "Object Not Found",
       {
-        status: 404
+        status:
+          404
       }
     );
   }
@@ -1728,31 +2021,38 @@ async function serveMedia(
     return new Response(
       null,
       {
-        status: 412,
+        status:
+          412,
+
         headers
       }
     );
   }
 
 
-  let status = 200;
+  let status =
+    200;
 
   if (
     object.range
     &&
     typeof object.range.offset
-      === "number"
+      ===
+      "number"
     &&
     typeof object.range.length
-      === "number"
+      ===
+      "number"
   ) {
     const start =
       object.range.offset;
 
     const end =
       start
-      + object.range.length
-      - 1;
+      +
+      object.range.length
+      -
+      1;
 
     headers.set(
       "content-range",
@@ -1766,7 +2066,8 @@ async function serveMedia(
       )
     );
 
-    status = 206;
+    status =
+      206;
   }
 
 
@@ -1785,6 +2086,7 @@ async function serveMedia(
 // ======================================================
 
 export default {
+
   async fetch(
     request,
     env,
