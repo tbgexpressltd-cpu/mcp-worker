@@ -3,12 +3,23 @@ import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
 type Env = {
+  // Existing Instagram API with Instagram Login token.
   META_ACCESS_TOKEN: string;
 
   // IMPORTANT:
-  // This secret now contains the permanent Meta SYSTEM USER token.
-  // The Worker uses it to retrieve the actual Facebook Page Access Token.
+  // Despite the historical variable name, this now stores
+  // the permanent Meta SYSTEM USER access token.
   FACEBOOK_PAGE_ACCESS_TOKEN: string;
+
+  // NEW:
+  // Facebook USER access token for Instagram API
+  // with Facebook Login.
+  //
+  // Required for Instagram Audio API.
+  //
+  // This is optional so the Worker can deploy before
+  // we configure the token in Cloudflare.
+  INSTAGRAM_FB_USER_ACCESS_TOKEN?: string;
 
   SOCIAL_MEDIA: R2Bucket;
 };
@@ -75,16 +86,31 @@ function safeFileName(
 ) {
   let safe =
     (name ?? "media")
-      .replace(/[^a-zA-Z0-9._-]/g, "-")
-      .replace(/-+/g, "-")
-      .slice(0, 100);
+      .replace(
+        /[^a-zA-Z0-9._-]/g,
+        "-"
+      )
+      .replace(
+        /-+/g,
+        "-"
+      )
+      .slice(
+        0,
+        100
+      );
 
   if (!safe.includes(".")) {
-    safe += extensionFromMime(mime);
+    safe +=
+      extensionFromMime(
+        mime
+      );
   }
 
-  return safe ||
-    `media${extensionFromMime(mime)}`;
+  return (
+    safe
+    ||
+    `media${extensionFromMime(mime)}`
+  );
 }
 
 
@@ -170,7 +196,9 @@ async function graphPost(
         },
 
         body:
-          JSON.stringify(body)
+          JSON.stringify(
+            body
+          )
       }
     );
 
@@ -256,7 +284,7 @@ async function graphPostForm(
 
 
 // ======================================================
-// INSTAGRAM AUTH
+// INSTAGRAM — EXISTING INSTAGRAM LOGIN AUTH
 // ======================================================
 
 async function getInstagramUserId(
@@ -286,20 +314,22 @@ async function getInstagramUserId(
 
 
 // ======================================================
-// FACEBOOK AUTH
+// FACEBOOK — SYSTEM USER → PAGE TOKEN
+// ======================================================
 //
-// FACEBOOK_PAGE_ACCESS_TOKEN contains our permanent
+// FACEBOOK_PAGE_ACCESS_TOKEN now contains the permanent
 // System User token.
 //
-// Meta's documented Pages API flow is:
+// Official Meta Pages flow:
 //
 // System User token
-//      ↓
+//       ↓
 // GET /me/accounts
-//      ↓
-// Page Access Token
-//      ↓
-// /feed, /posts, /photos, /video_reels etc.
+//       ↓
+// Facebook Page Access Token
+//       ↓
+// /feed, /photos, /video_reels etc.
+//
 // ======================================================
 
 async function getFacebookPageAccessToken(
@@ -329,7 +359,8 @@ async function getFacebookPageAccessToken(
   const page =
     accounts.data?.find(
       item =>
-        item.id ===
+        item.id
+        ===
         FACEBOOK_PAGE_ID
     );
 
@@ -350,6 +381,128 @@ async function getFacebookPageAccessToken(
 
 
 // ======================================================
+// INSTAGRAM — FACEBOOK LOGIN AUTH FOR MUSIC
+// ======================================================
+
+function requireInstagramFacebookUserToken(
+  env: Env
+) {
+  if (
+    !env.INSTAGRAM_FB_USER_ACCESS_TOKEN
+  ) {
+    throw new Error(
+      "Instagram Music is not configured yet. " +
+      "Add the Cloudflare secret INSTAGRAM_FB_USER_ACCESS_TOKEN " +
+      "using a Facebook User access token with instagram_basic " +
+      "and instagram_content_publish."
+    );
+  }
+
+  return (
+    env.INSTAGRAM_FB_USER_ACCESS_TOKEN
+  );
+}
+
+
+async function getFacebookLoginInstagramUserId(
+  env: Env
+) {
+  const token =
+    requireInstagramFacebookUserToken(
+      env
+    );
+
+  const page =
+    (await graphGet(
+      FACEBOOK_GRAPH,
+      token,
+      FACEBOOK_PAGE_ID,
+      {
+        fields:
+          "instagram_business_account"
+      }
+    )) as {
+      instagram_business_account?: {
+        id?: string;
+      };
+    };
+
+  const igId =
+    page
+      ?.instagram_business_account
+      ?.id;
+
+  if (!igId) {
+    throw new Error(
+      "Could not resolve the Instagram Business account linked to the TBG Motors Facebook Page."
+    );
+  }
+
+  return igId;
+}
+
+
+// ======================================================
+// INSTAGRAM AUDIO HELPERS
+// ======================================================
+
+function normalizeInstagramAudio(
+  item: any
+) {
+  return {
+    audio_id:
+      item?.audio_id
+      ??
+      item?.id
+      ??
+      null,
+
+    title:
+      item?.title
+      ??
+      null,
+
+    display_artist:
+      item?.display_artist
+      ??
+      null,
+
+    duration_in_ms:
+      item?.duration_in_ms
+      ??
+      null,
+
+    audio_type:
+      item?.audio_type
+      ??
+      null,
+
+    cover_artwork_thumbnail_uri:
+      item?.cover_artwork_thumbnail_uri
+      ??
+      item?.cover_artwork_thumbnail_url
+      ??
+      null,
+
+    download_url:
+      item?.download_url
+      ??
+      null,
+
+    on_platform_audio_preview_link:
+      item?.on_platform_audio_preview_link
+      ??
+      null,
+
+    is_ads_eligible:
+      item?.is_ads_eligible
+      ??
+      null
+  };
+}
+
+
+// ======================================================
 // MCP RESPONSE HELPERS
 // ======================================================
 
@@ -359,7 +512,8 @@ function result(
   return {
     content: [
       {
-        type: "text" as const,
+        type:
+          "text" as const,
 
         text:
           JSON.stringify(
@@ -378,16 +532,22 @@ function errorResult(
 ) {
   const message =
     error instanceof Error
-      ? error.message
-      : "Unknown Meta API error";
+      ?
+      error.message
+      :
+      "Unknown Meta API error";
 
   return {
-    isError: true,
+    isError:
+      true,
 
     content: [
       {
-        type: "text" as const,
-        text: message
+        type:
+          "text" as const,
+
+        text:
+          message
       }
     ]
   };
@@ -407,12 +567,12 @@ function createServer(
         "TBG Motors Social",
 
       version:
-        "1.4.1"
+        "1.5.0"
     });
 
 
   // ====================================================
-  // R2 — UPLOAD FILES DIRECTLY FROM CHATGPT
+  // R2 — UPLOAD FILES FROM CHATGPT
   // ====================================================
 
   server.registerTool(
@@ -423,7 +583,7 @@ function createServer(
         "Upload social media files",
 
       description:
-        "Upload one or more user-provided ChatGPT image/video files to TBG Motors temporary R2 media storage. Returns public HTTPS URLs that can then be used for Instagram or Facebook publishing.",
+        "Upload one or more user-provided ChatGPT image/video files to TBG Motors temporary R2 media storage. Returns public HTTPS URLs that can be used for Instagram or Facebook publishing.",
 
       inputSchema: {
         files:
@@ -462,7 +622,8 @@ function createServer(
       }
     ) => {
       try {
-        const uploaded = [];
+        const uploaded =
+          [];
 
         for (
           const file
@@ -504,32 +665,34 @@ function createServer(
             `${Date.now()}-${crypto.randomUUID()}-${name}`;
 
           const stored =
-            await env.SOCIAL_MEDIA.put(
-              key,
-              response.body,
-              {
-                httpMetadata: {
-                  contentType:
-                    mime,
+            await env
+              .SOCIAL_MEDIA
+              .put(
+                key,
+                response.body,
+                {
+                  httpMetadata: {
+                    contentType:
+                      mime,
 
-                  contentDisposition:
-                    "inline",
+                    contentDisposition:
+                      "inline",
 
-                  cacheControl:
-                    "public, max-age=3600"
-                },
+                    cacheControl:
+                      "public, max-age=3600"
+                  },
 
-                customMetadata: {
-                  originalName:
-                    file.file_name
-                    ??
-                    name,
+                  customMetadata: {
+                    originalName:
+                      file.file_name
+                      ??
+                      name,
 
-                  chatgptFileId:
-                    file.file_id
+                    chatgptFileId:
+                      file.file_id
+                  }
                 }
-              }
-            );
+              );
 
           uploaded.push({
             key,
@@ -596,14 +759,373 @@ function createServer(
       keys
     }) => {
       try {
-        await env.SOCIAL_MEDIA.delete(
-          keys
-        );
+        await env
+          .SOCIAL_MEDIA
+          .delete(
+            keys
+          );
 
         return result({
           deleted:
             keys
         });
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // INSTAGRAM MUSIC — SEARCH
+  // ====================================================
+
+  server.registerTool(
+    "search_instagram_audio",
+
+    {
+      description:
+        "Search official Instagram music using the Instagram Audio API. Read-only. Returns track metadata but never access tokens.",
+
+      inputSchema: {
+        search_query:
+          z.string()
+            .min(1)
+            .max(200),
+
+        limit:
+          z.number()
+            .int()
+            .min(1)
+            .max(25)
+            .optional()
+      },
+
+      annotations: {
+        readOnlyHint:
+          true
+      }
+    },
+
+    async ({
+      search_query,
+      limit
+    }) => {
+      try {
+        const token =
+          requireInstagramFacebookUserToken(
+            env
+          );
+
+        const igId =
+          await getFacebookLoginInstagramUserId(
+            env
+          );
+
+        const data:
+          any =
+          await graphGet(
+            FACEBOOK_GRAPH,
+            token,
+            "ig_audio",
+            {
+              audio_type:
+                "music",
+
+              user_id:
+                igId,
+
+              search_query
+            }
+          );
+
+        const audio =
+          Array.isArray(
+            data?.audio
+          )
+            ?
+            data.audio
+            :
+            Array.isArray(
+              data?.data
+            )
+              ?
+              data.data
+              :
+              [];
+
+        return result({
+          query:
+            search_query,
+
+          audio:
+            audio
+              .slice(
+                0,
+                limit
+                ??
+                10
+              )
+              .map(
+                normalizeInstagramAudio
+              ),
+
+          paging:
+            data?.paging
+            ??
+            null
+        });
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // INSTAGRAM MUSIC — TRENDING
+  // ====================================================
+
+  server.registerTool(
+    "get_trending_instagram_audio",
+
+    {
+      description:
+        "Get trending Instagram music using the official Instagram Audio API. Read-only.",
+
+      inputSchema: {
+        limit:
+          z.number()
+            .int()
+            .min(1)
+            .max(25)
+            .optional()
+      },
+
+      annotations: {
+        readOnlyHint:
+          true
+      }
+    },
+
+    async ({
+      limit
+    }) => {
+      try {
+        const token =
+          requireInstagramFacebookUserToken(
+            env
+          );
+
+        const igId =
+          await getFacebookLoginInstagramUserId(
+            env
+          );
+
+        const data:
+          any =
+          await graphGet(
+            FACEBOOK_GRAPH,
+            token,
+            "ig_audio",
+            {
+              audio_type:
+                "music",
+
+              user_id:
+                igId
+            }
+          );
+
+        const audio =
+          Array.isArray(
+            data?.audio
+          )
+            ?
+            data.audio
+            :
+            Array.isArray(
+              data?.data
+            )
+              ?
+              data.data
+              :
+              [];
+
+        return result({
+          audio:
+            audio
+              .slice(
+                0,
+                limit
+                ??
+                10
+              )
+              .map(
+                normalizeInstagramAudio
+              ),
+
+          paging:
+            data?.paging
+            ??
+            null
+        });
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // INSTAGRAM MUSIC — GET ONE TRACK
+  // ====================================================
+
+  server.registerTool(
+    "get_instagram_audio",
+
+    {
+      description:
+        "Get official Instagram audio metadata for one audio_id. Read-only.",
+
+      inputSchema: {
+        audio_id:
+          z.string()
+            .min(1)
+      },
+
+      annotations: {
+        readOnlyHint:
+          true
+      }
+    },
+
+    async ({
+      audio_id
+    }) => {
+      try {
+        const token =
+          requireInstagramFacebookUserToken(
+            env
+          );
+
+        const igId =
+          await getFacebookLoginInstagramUserId(
+            env
+          );
+
+        const data =
+          await graphGet(
+            FACEBOOK_GRAPH,
+            token,
+            audio_id,
+            {
+              user_id:
+                igId
+            }
+          );
+
+        return result(
+          normalizeInstagramAudio(
+            data
+          )
+        );
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // FACEBOOK MUSIC RECOMMENDATIONS
+  // ====================================================
+
+  server.registerTool(
+    "get_facebook_music_recommendations",
+
+    {
+      description:
+        "Get Meta/Facebook music recommendations. Read-only. This does not attach the selected music to a Facebook Reel.",
+
+      inputSchema: {
+        type:
+          z.enum([
+            "FACEBOOK_POPULAR_MUSIC",
+            "FACEBOOK_NEW_MUSIC",
+            "FACEBOOK_FOR_YOU"
+          ]),
+
+        countries:
+          z.array(
+            z.string()
+              .regex(
+                /^[A-Za-z]{2}$/
+              )
+          )
+          .max(10)
+          .optional()
+      },
+
+      annotations: {
+        readOnlyHint:
+          true
+      }
+    },
+
+    async ({
+      type,
+      countries
+    }) => {
+      try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
+        const params:
+          Record<
+            string,
+            string
+          > = {
+            type
+          };
+
+        if (
+          countries
+          &&
+          countries.length
+        ) {
+          params.available_countries =
+            countries
+              .map(
+                value =>
+                  value
+                    .toUpperCase()
+              )
+              .join(",");
+        }
+
+        return result(
+          await graphGet(
+            FACEBOOK_GRAPH,
+            pageToken,
+            "audio/recommendations",
+            params
+          )
+        );
 
       } catch (error) {
         return errorResult(
@@ -815,7 +1337,7 @@ function createServer(
 
 
   // ====================================================
-  // INSTAGRAM — PREPARE PHOTO
+  // INSTAGRAM — PHOTO CONTAINER
   // ====================================================
 
   server.registerTool(
@@ -823,7 +1345,7 @@ function createServer(
 
     {
       description:
-        "Prepare an Instagram photo post for TBG Motors. This does NOT publish it. image_url should normally be an R2 /media URL returned by upload_social_media.",
+        "Prepare an Instagram PHOTO post for TBG Motors. This does NOT publish it. Static photo posts do not support Instagram Audio API music.",
 
       inputSchema: {
         image_url:
@@ -904,7 +1426,13 @@ function createServer(
 
 
   // ====================================================
-  // INSTAGRAM — PREPARE REEL
+  // INSTAGRAM — REEL CONTAINER
+  //
+  // No audio_configuration:
+  // existing Instagram Login flow.
+  //
+  // With audio_configuration:
+  // Instagram API with Facebook Login.
   // ====================================================
 
   server.registerTool(
@@ -912,7 +1440,7 @@ function createServer(
 
     {
       description:
-        "Prepare an Instagram Reel for TBG Motors. This does NOT publish it. video_url should normally be an R2 /media URL returned by upload_social_media.",
+        "Prepare an Instagram Reel. This does NOT publish it. When audio_configuration is supplied, official Instagram Audio API music is attached using Instagram API with Facebook Login.",
 
       inputSchema: {
         video_url:
@@ -939,7 +1467,33 @@ function createServer(
 
         is_ai_generated:
           z.boolean()
-            .optional()
+            .optional(),
+
+        audio_configuration:
+          z.object({
+            audio_id:
+              z.string()
+                .min(1),
+
+            audio_volume:
+              z.number()
+                .int()
+                .min(0)
+                .max(100)
+                .optional(),
+
+            video_volume:
+              z.number()
+                .int()
+                .min(0)
+                .max(100)
+                .optional(),
+
+            should_loop_audio:
+              z.boolean()
+                .optional()
+          })
+          .optional()
       }
     },
 
@@ -949,9 +1503,155 @@ function createServer(
       cover_url,
       share_to_feed,
       audio_name,
-      is_ai_generated
+      is_ai_generated,
+      audio_configuration
     }) => {
       try {
+
+        // ----------------------------------------------
+        // AUDIO API FLOW
+        // ----------------------------------------------
+
+        if (
+          audio_configuration
+        ) {
+          if (audio_name) {
+            throw new Error(
+              "audio_name cannot be combined with audio_configuration."
+            );
+          }
+
+          const token =
+            requireInstagramFacebookUserToken(
+              env
+            );
+
+          const igId =
+            await getFacebookLoginInstagramUserId(
+              env
+            );
+
+          const audioConfig:
+            Record<
+              string,
+              unknown
+            > = {
+              audio_id:
+                audio_configuration
+                  .audio_id
+            };
+
+          if (
+            audio_configuration
+              .audio_volume
+            !==
+            undefined
+          ) {
+            audioConfig.audio_volume =
+              audio_configuration
+                .audio_volume;
+          }
+
+          if (
+            audio_configuration
+              .video_volume
+            !==
+            undefined
+          ) {
+            audioConfig.video_volume =
+              audio_configuration
+                .video_volume;
+          }
+
+          if (
+            audio_configuration
+              .should_loop_audio
+            !==
+            undefined
+          ) {
+            audioConfig.should_loop_audio =
+              audio_configuration
+                .should_loop_audio;
+          }
+
+
+          const form:
+            Record<
+              string,
+              string
+            > = {
+              media_type:
+                "REELS",
+
+              video_url,
+
+              audio_configuration:
+                JSON.stringify(
+                  audioConfig
+                )
+            };
+
+
+          if (caption) {
+            form.caption =
+              caption;
+          }
+
+          if (cover_url) {
+            form.cover_url =
+              cover_url;
+          }
+
+          if (
+            share_to_feed
+            !==
+            undefined
+          ) {
+            form.share_to_feed =
+              String(
+                share_to_feed
+              );
+          }
+
+          if (
+            is_ai_generated
+            !==
+            undefined
+          ) {
+            form.is_ai_generated =
+              String(
+                is_ai_generated
+              );
+          }
+
+
+          const data:
+            any =
+            await graphPostForm(
+              FACEBOOK_GRAPH,
+              token,
+              `${igId}/media`,
+              form
+            );
+
+
+          return result({
+            ...data,
+
+            api_mode:
+              "facebook_login",
+
+            selected_audio_id:
+              audio_configuration
+                .audio_id
+          });
+        }
+
+
+        // ----------------------------------------------
+        // EXISTING INSTAGRAM LOGIN FLOW
+        // ----------------------------------------------
+
         const igId =
           await getInstagramUserId(
             env
@@ -1001,14 +1701,23 @@ function createServer(
             is_ai_generated;
         }
 
-        return result(
+
+        const data:
+          any =
           await graphPost(
             INSTAGRAM_GRAPH,
             env.META_ACCESS_TOKEN,
             `${igId}/media`,
             body
-          )
-        );
+          );
+
+
+        return result({
+          ...data,
+
+          api_mode:
+            "instagram_login"
+        });
 
       } catch (error) {
         return errorResult(
@@ -1020,7 +1729,7 @@ function createServer(
 
 
   // ====================================================
-  // INSTAGRAM — PREPARE CAROUSEL
+  // INSTAGRAM — CAROUSEL
   // ====================================================
 
   server.registerTool(
@@ -1115,6 +1824,7 @@ function createServer(
               "VIDEO";
           }
 
+
           const child =
             (await graphPost(
               INSTAGRAM_GRAPH,
@@ -1124,6 +1834,7 @@ function createServer(
             )) as {
               id?: string;
             };
+
 
           if (!child.id) {
             throw new Error(
@@ -1136,6 +1847,7 @@ function createServer(
           );
         }
 
+
         const parentBody:
           Record<
             string,
@@ -1147,6 +1859,7 @@ function createServer(
             children:
               childIds.join(",")
           };
+
 
         if (caption) {
           parentBody.caption =
@@ -1162,6 +1875,7 @@ function createServer(
             is_ai_generated;
         }
 
+
         const parent =
           await graphPost(
             INSTAGRAM_GRAPH,
@@ -1169,6 +1883,7 @@ function createServer(
             `${igId}/media`,
             parentBody
           );
+
 
         return result({
           child_container_ids:
@@ -1187,17 +1902,28 @@ function createServer(
   );
 
 
+  // ====================================================
+  // INSTAGRAM — CHECK CONTAINER
+  // ====================================================
+
   server.registerTool(
     "check_instagram_container",
 
     {
       description:
-        "Check whether an Instagram media container is ready to publish. Read-only.",
+        "Check whether an Instagram media container is ready to publish. Use api_mode=facebook_login for a Reel created with Instagram Audio API music. Read-only.",
 
       inputSchema: {
         container_id:
           z.string()
-            .min(1)
+            .min(1),
+
+        api_mode:
+          z.enum([
+            "instagram_login",
+            "facebook_login"
+          ])
+          .optional()
       },
 
       annotations: {
@@ -1207,9 +1933,35 @@ function createServer(
     },
 
     async ({
-      container_id
+      container_id,
+      api_mode
     }) => {
       try {
+
+        if (
+          api_mode
+          ===
+          "facebook_login"
+        ) {
+          const token =
+            requireInstagramFacebookUserToken(
+              env
+            );
+
+          return result(
+            await graphGet(
+              FACEBOOK_GRAPH,
+              token,
+              container_id,
+              {
+                fields:
+                  "id,status_code"
+              }
+            )
+          );
+        }
+
+
         return result(
           await graphGet(
             INSTAGRAM_GRAPH,
@@ -1231,28 +1983,70 @@ function createServer(
   );
 
 
+  // ====================================================
+  // INSTAGRAM — FINAL PUBLISH
+  // ====================================================
+
   server.registerTool(
     "publish_instagram_media",
 
     {
       description:
-        "FINAL PUBLICATION ACTION. Publish a prepared Instagram photo, Reel or carousel to the public TBG Motors Instagram account. Only use after explicit user approval.",
+        "FINAL PUBLICATION ACTION. Publish a prepared Instagram photo, Reel or carousel. Use api_mode returned when creating an audio-enabled Reel. Only use after explicit user approval.",
 
       inputSchema: {
         creation_id:
           z.string()
-            .min(1)
+            .min(1),
+
+        api_mode:
+          z.enum([
+            "instagram_login",
+            "facebook_login"
+          ])
+          .optional()
       }
     },
 
     async ({
-      creation_id
+      creation_id,
+      api_mode
     }) => {
       try {
+
+        if (
+          api_mode
+          ===
+          "facebook_login"
+        ) {
+          const token =
+            requireInstagramFacebookUserToken(
+              env
+            );
+
+          const igId =
+            await getFacebookLoginInstagramUserId(
+              env
+            );
+
+          return result(
+            await graphPostForm(
+              FACEBOOK_GRAPH,
+              token,
+              `${igId}/media_publish`,
+              {
+                creation_id
+              }
+            )
+          );
+        }
+
+
         const igId =
           await getInstagramUserId(
             env
           );
+
 
         return result(
           await graphPost(
@@ -1275,7 +2069,7 @@ function createServer(
 
 
   // ====================================================
-  // FACEBOOK — READ
+  // FACEBOOK — READ PAGE
   // ====================================================
 
   server.registerTool(
@@ -1322,12 +2116,16 @@ function createServer(
   );
 
 
+  // ====================================================
+  // FACEBOOK — LIST POSTS
+  // ====================================================
+
   server.registerTool(
     "list_facebook_posts",
 
     {
       description:
-        "List recent posts published by the TBG Motors Facebook Page. Read-only.",
+        "List recent posts on the TBG Motors Facebook Page. Read-only.",
 
       inputSchema: {
         limit:
@@ -1357,7 +2155,11 @@ function createServer(
           await graphGet(
             FACEBOOK_GRAPH,
             pageToken,
-            `${FACEBOOK_PAGE_ID}/posts`,
+
+            // IMPORTANT:
+            // current Meta Pages API uses /feed here
+            `${FACEBOOK_PAGE_ID}/feed`,
+
             {
               fields:
                 "id,message,created_time,permalink_url",
@@ -1380,6 +2182,10 @@ function createServer(
     }
   );
 
+
+  // ====================================================
+  // FACEBOOK — GET ONE POST
+  // ====================================================
 
   server.registerTool(
     "get_facebook_post",
@@ -1417,6 +2223,66 @@ function createServer(
             {
               fields:
                 "id,message,created_time,permalink_url"
+            }
+          )
+        );
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // FACEBOOK — LIST REELS
+  // ====================================================
+
+  server.registerTool(
+    "list_facebook_reels",
+
+    {
+      description:
+        "List recent Reels on the TBG Motors Facebook Page. Read-only. Useful for Instagram to Facebook crossposting tests.",
+
+      inputSchema: {
+        limit:
+          z.number()
+            .int()
+            .min(1)
+            .max(25)
+            .optional()
+      },
+
+      annotations: {
+        readOnlyHint:
+          true
+      }
+    },
+
+    async ({
+      limit
+    }) => {
+      try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
+        return result(
+          await graphGet(
+            FACEBOOK_GRAPH,
+            pageToken,
+            `${FACEBOOK_PAGE_ID}/video_reels`,
+            {
+              limit:
+                String(
+                  limit
+                  ??
+                  10
+                )
             }
           )
         );
@@ -1523,10 +2389,12 @@ function createServer(
             string
           > = {};
 
+
         if (message) {
           form.message =
             message;
         }
+
 
         photo_ids.forEach(
           (
@@ -1542,6 +2410,7 @@ function createServer(
               });
           }
         );
+
 
         return result(
           await graphPostForm(
@@ -1562,7 +2431,7 @@ function createServer(
 
 
   // ====================================================
-  // FACEBOOK — TEXT / LINK
+  // FACEBOOK — TEXT / LINK POST
   // ====================================================
 
   server.registerTool(
@@ -1600,14 +2469,17 @@ function createServer(
             unknown
           > = {
             message,
+
             published:
               true
           };
+
 
         if (link) {
           body.link =
             link;
         }
+
 
         return result(
           await graphPost(
@@ -1654,6 +2526,7 @@ function createServer(
             env
           );
 
+
         const start =
           (await graphPost(
             FACEBOOK_GRAPH,
@@ -1668,6 +2541,7 @@ function createServer(
             upload_url?: string;
           };
 
+
         if (
           !start.video_id
           ||
@@ -1677,6 +2551,7 @@ function createServer(
             "Meta did not return a Facebook Reel video_id and upload_url."
           );
         }
+
 
         const uploadResponse =
           await fetch(
@@ -1695,8 +2570,10 @@ function createServer(
             }
           );
 
+
         const uploadData =
           await uploadResponse.json();
+
 
         if (
           !uploadResponse.ok
@@ -1712,6 +2589,7 @@ function createServer(
             message
           );
         }
+
 
         return result({
           video_id:
@@ -1729,6 +2607,10 @@ function createServer(
     }
   );
 
+
+  // ====================================================
+  // FACEBOOK — CHECK REEL
+  // ====================================================
 
   server.registerTool(
     "check_facebook_reel",
@@ -1779,6 +2661,10 @@ function createServer(
   );
 
 
+  // ====================================================
+  // FACEBOOK — FINAL REEL PUBLISH
+  // ====================================================
+
   server.registerTool(
     "publish_facebook_reel",
 
@@ -1812,6 +2698,7 @@ function createServer(
             env
           );
 
+
         const body:
           Record<
             string,
@@ -1826,15 +2713,18 @@ function createServer(
               "PUBLISHED"
           };
 
+
         if (description) {
           body.description =
             description;
         }
 
+
         if (title) {
           body.title =
             title;
         }
+
 
         return result(
           await graphPost(
@@ -1871,12 +2761,14 @@ async function serveMedia(
       request.url
     );
 
+
   const encodedKey =
     url.pathname
       .replace(
         /^\/media\//,
         ""
       );
+
 
   if (!encodedKey) {
     return new Response(
@@ -1887,6 +2779,7 @@ async function serveMedia(
       }
     );
   }
+
 
   const key =
     decodeURIComponent(
@@ -1900,9 +2793,12 @@ async function serveMedia(
     "HEAD"
   ) {
     const object =
-      await env.SOCIAL_MEDIA.head(
-        key
-      );
+      await env
+        .SOCIAL_MEDIA
+        .head(
+          key
+        );
+
 
     if (!object) {
       return new Response(
@@ -1914,17 +2810,21 @@ async function serveMedia(
       );
     }
 
+
     const headers =
       new Headers();
+
 
     object.writeHttpMetadata(
       headers
     );
 
+
     headers.set(
       "etag",
       object.httpEtag
     );
+
 
     headers.set(
       "content-length",
@@ -1933,10 +2833,12 @@ async function serveMedia(
       )
     );
 
+
     headers.set(
       "accept-ranges",
       "bytes"
     );
+
 
     return new Response(
       null,
@@ -1971,16 +2873,18 @@ async function serveMedia(
 
 
   const object =
-    await env.SOCIAL_MEDIA.get(
-      key,
-      {
-        onlyIf:
-          request.headers,
+    await env
+      .SOCIAL_MEDIA
+      .get(
+        key,
+        {
+          onlyIf:
+            request.headers,
 
-        range:
-          request.headers
-      }
-    );
+          range:
+            request.headers
+        }
+      );
 
 
   if (!object) {
@@ -1997,19 +2901,23 @@ async function serveMedia(
   const headers =
     new Headers();
 
+
   object.writeHttpMetadata(
     headers
   );
+
 
   headers.set(
     "etag",
     object.httpEtag
   );
 
+
   headers.set(
     "accept-ranges",
     "bytes"
   );
+
 
   headers.set(
     "access-control-allow-origin",
@@ -2033,6 +2941,7 @@ async function serveMedia(
   let status =
     200;
 
+
   if (
     object.range
     &&
@@ -2047,6 +2956,7 @@ async function serveMedia(
     const start =
       object.range.offset;
 
+
     const end =
       start
       +
@@ -2054,10 +2964,12 @@ async function serveMedia(
       -
       1;
 
+
     headers.set(
       "content-range",
       `bytes ${start}-${end}/${object.size}`
     );
+
 
     headers.set(
       "content-length",
@@ -2065,6 +2977,7 @@ async function serveMedia(
         object.range.length
       )
     );
+
 
     status =
       206;
@@ -2096,6 +3009,7 @@ export default {
       new URL(
         request.url
       );
+
 
     if (
       url.pathname
