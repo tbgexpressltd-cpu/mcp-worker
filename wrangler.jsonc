@@ -20,34 +20,6 @@
     "binding": "MEDIA"
   },
 
-  "containers": [
-    {
-      "class_name": "VideoProcessor",
-      "scheduling_policy": "durable_object",
-      "images": {
-        "base": {
-          "dockerfile": "./Dockerfile.media"
-        }
-      }
-    }
-  ],
-
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "VIDEO_PROCESSOR",
-        "class_name": "VideoProcessor"
-      }
-    ]
-  },
-
-  "exports": {
-    "VideoProcessor": {
-      "type": "durable-object",
-      "storage": "sqlite"
-    }
-  },
-
   "assets": {
     "not_found_handling": "single-page-application",
     "run_worker_first": [
