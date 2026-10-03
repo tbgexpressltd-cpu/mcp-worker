@@ -6254,6 +6254,722 @@ async function serveMedia(
 
 
 // ======================================================
+// SOCIAL SCHEDULER — DURABLE OBJECT
+// ======================================================
+
+export class SocialScheduler
+  extends DurableObject<Env> {
+
+  private async readJobs() {
+    return (
+      await this
+        .ctx
+        .storage
+        .get<
+          SocialScheduleJob[]
+        >(
+          "social_jobs"
+        )
+    )
+    ??
+    [];
+  }
+
+
+  private async writeJobs(
+    jobs: SocialScheduleJob[]
+  ) {
+    await this
+      .ctx
+      .storage
+      .put(
+        "social_jobs",
+        jobs
+      );
+  }
+
+
+  private async scheduleNext(
+    jobs?: SocialScheduleJob[]
+  ) {
+    const allJobs =
+      jobs
+      ??
+      await this
+        .readJobs();
+
+
+    const candidates =
+      allJobs
+        .filter(
+          job =>
+            (
+              job.status
+              ===
+              "scheduled"
+              ||
+              job.status
+              ===
+              "processing"
+            )
+            &&
+            Number.isFinite(
+              Date.parse(
+                job.next_run_at
+                ??
+                job.scheduled_at
+              )
+            )
+        )
+        .sort(
+          (
+            a,
+            b
+          ) =>
+            Date.parse(
+              a.next_run_at
+              ??
+              a.scheduled_at
+            )
+            -
+            Date.parse(
+              b.next_run_at
+              ??
+              b.scheduled_at
+            )
+        );
+
+
+    if (
+      !candidates.length
+    ) {
+      await this
+        .ctx
+        .storage
+        .deleteAlarm();
+
+      return;
+    }
+
+
+    const next =
+      Math.max(
+        Date.now()
+        +
+        1000,
+        Date.parse(
+          candidates[0]
+            .next_run_at
+          ??
+          candidates[0]
+            .scheduled_at
+        )
+      );
+
+
+    await this
+      .ctx
+      .storage
+      .setAlarm(
+        next
+      );
+  }
+
+
+  async fetch(
+    request: Request
+  ) {
+    try {
+      const url =
+        new URL(
+          request.url
+        );
+
+
+      const jobs =
+        await this
+          .readJobs();
+
+
+      if (
+        request.method
+        ===
+        "GET"
+        &&
+        url.pathname
+        ===
+        "/jobs"
+      ) {
+        const status =
+          url.searchParams
+            .get(
+              "status"
+            );
+
+
+        const filtered =
+          status
+            ?
+            jobs.filter(
+              job =>
+                job.status
+                ===
+                status
+            )
+            :
+            jobs;
+
+
+        return Response.json({
+          jobs:
+            filtered
+              .slice()
+              .sort(
+                (
+                  a,
+                  b
+                ) =>
+                  Date.parse(
+                    a.scheduled_at
+                  )
+                  -
+                  Date.parse(
+                    b.scheduled_at
+                  )
+              )
+        });
+      }
+
+
+      if (
+        request.method
+        ===
+        "POST"
+        &&
+        url.pathname
+        ===
+        "/jobs"
+      ) {
+        const body:
+          any =
+          await request
+            .json();
+
+
+        const scheduledAt =
+          new Date(
+            body
+              ?.scheduled_at
+          );
+
+
+        if (
+          Number.isNaN(
+            scheduledAt.getTime()
+          )
+          ||
+          scheduledAt.getTime()
+          <=
+          Date.now()
+        ) {
+          return Response.json(
+            {
+              error:
+                "scheduled_at must be a valid future date-time."
+            },
+            {
+              status:
+                400
+            }
+          );
+        }
+
+
+        const now =
+          new Date()
+            .toISOString();
+
+
+        const job:
+          SocialScheduleJob = {
+          id:
+            crypto.randomUUID(),
+
+          scheduled_at:
+            scheduledAt
+              .toISOString(),
+
+          next_run_at:
+            scheduledAt
+              .toISOString(),
+
+          status:
+            "scheduled",
+
+          content:
+            body
+              .content,
+
+          progress:
+            {},
+
+          created_at:
+            now,
+
+          updated_at:
+            now
+        };
+
+
+        jobs.push(
+          job
+        );
+
+
+        await this
+          .writeJobs(
+            jobs
+          );
+
+
+        await this
+          .scheduleNext(
+            jobs
+          );
+
+
+        return Response.json({
+          job
+        });
+      }
+
+
+      const match =
+        url.pathname
+          .match(
+            /^\/jobs\/([^/]+)$/
+          );
+
+
+      if (
+        !match
+      ) {
+        return Response.json(
+          {
+            error:
+              "Not found"
+          },
+          {
+            status:
+              404
+          }
+        );
+      }
+
+
+      const jobId =
+        decodeURIComponent(
+          match[1]
+        );
+
+
+      const index =
+        jobs
+          .findIndex(
+            job =>
+              job.id
+              ===
+              jobId
+          );
+
+
+      if (
+        index
+        <
+        0
+      ) {
+        return Response.json(
+          {
+            error:
+              "Scheduled job not found."
+          },
+          {
+            status:
+              404
+          }
+        );
+      }
+
+
+      if (
+        request.method
+        ===
+        "PATCH"
+      ) {
+        const job =
+          jobs[
+            index
+          ];
+
+
+        if (
+          job.status
+          !==
+          "scheduled"
+        ) {
+          return Response.json(
+            {
+              error:
+                "Only jobs that have not started can be moved."
+            },
+            {
+              status:
+                409
+            }
+          );
+        }
+
+
+        const body:
+          any =
+          await request
+            .json();
+
+
+        const scheduledAt =
+          new Date(
+            body
+              ?.scheduled_at
+          );
+
+
+        if (
+          Number.isNaN(
+            scheduledAt.getTime()
+          )
+          ||
+          scheduledAt.getTime()
+          <=
+          Date.now()
+        ) {
+          return Response.json(
+            {
+              error:
+                "scheduled_at must be a valid future date-time."
+            },
+            {
+              status:
+                400
+            }
+          );
+        }
+
+
+        job.scheduled_at =
+          scheduledAt
+            .toISOString();
+
+        job.next_run_at =
+          job.scheduled_at;
+
+        job.updated_at =
+          new Date()
+            .toISOString();
+
+
+        jobs[
+          index
+        ] =
+          job;
+
+
+        await this
+          .writeJobs(
+            jobs
+          );
+
+
+        await this
+          .scheduleNext(
+            jobs
+          );
+
+
+        return Response.json({
+          job
+        });
+      }
+
+
+      if (
+        request.method
+        ===
+        "DELETE"
+      ) {
+        const job =
+          jobs[
+            index
+          ];
+
+
+        if (
+          job.status
+          ===
+          "completed"
+        ) {
+          return Response.json(
+            {
+              error:
+                "A completed scheduled job cannot be cancelled."
+            },
+            {
+              status:
+                409
+            }
+          );
+        }
+
+
+        job.status =
+          "cancelled";
+
+        job.updated_at =
+          new Date()
+            .toISOString();
+
+
+        jobs[
+          index
+        ] =
+          job;
+
+
+        await this
+          .writeJobs(
+            jobs
+          );
+
+
+        await this
+          .scheduleNext(
+            jobs
+          );
+
+
+        return Response.json({
+          job
+        });
+      }
+
+
+      return Response.json(
+        {
+          error:
+            "Method not allowed"
+        },
+        {
+          status:
+            405
+        }
+      );
+
+    } catch (
+      error
+    ) {
+      return Response.json(
+        {
+          error:
+            error instanceof Error
+              ?
+              error.message
+              :
+              "Unknown scheduler error"
+        },
+        {
+          status:
+            500
+        }
+      );
+    }
+  }
+
+
+  async alarm() {
+    let jobs =
+      await this
+        .readJobs();
+
+
+    const now =
+      Date.now();
+
+
+    const dueIds =
+      jobs
+        .filter(
+          job =>
+            (
+              job.status
+              ===
+              "scheduled"
+              ||
+              job.status
+              ===
+              "processing"
+            )
+            &&
+            Date.parse(
+              job.next_run_at
+              ??
+              job.scheduled_at
+            )
+            <=
+            now
+            +
+            1000
+        )
+        .map(
+          job =>
+            job.id
+        );
+
+
+    for (
+      const id
+      of dueIds
+    ) {
+      const index =
+        jobs
+          .findIndex(
+            job =>
+              job.id
+              ===
+              id
+          );
+
+
+      if (
+        index
+        <
+        0
+      ) {
+        continue;
+      }
+
+
+      let job =
+        jobs[
+          index
+        ];
+
+
+      if (
+        job.status
+        ===
+        "cancelled"
+        ||
+        job.status
+        ===
+        "completed"
+      ) {
+        continue;
+      }
+
+
+      job.status =
+        "processing";
+
+      job.updated_at =
+        new Date()
+          .toISOString();
+
+
+      jobs[
+        index
+      ] =
+        job;
+
+
+      await this
+        .writeJobs(
+          jobs
+        );
+
+
+      try {
+        const execution =
+          await runScheduledSocialJob(
+            this.env,
+            job
+          );
+
+
+        job.progress =
+          execution.progress;
+
+        job.updated_at =
+          new Date()
+            .toISOString();
+
+
+        if (
+          execution.completed
+        ) {
+          job.status =
+            "completed";
+
+        } else {
+          job.status =
+            "processing";
+
+          job.next_run_at =
+            execution.next_run_at;
+        }
+
+
+        delete job.error;
+
+      } catch (
+        error
+      ) {
+        job.status =
+          "failed";
+
+        job.error =
+          error instanceof Error
+            ?
+            error.message
+            :
+            "Unknown scheduled publication error";
+
+        job.updated_at =
+          new Date()
+            .toISOString();
+      }
+
+
+      jobs[
+        index
+      ] =
+        job;
+
+
+      await this
+        .writeJobs(
+          jobs
+        );
+    }
+
+
+    await this
+      .scheduleNext(
+        jobs
+      );
+  }
+}
+
+
+// ======================================================
 // CLOUDFLARE ENTRY
 // ======================================================
 
