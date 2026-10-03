@@ -20,20 +20,8 @@
     "binding": "MEDIA"
   },
 
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "SOCIAL_SCHEDULER",
-        "class_name": "SocialScheduler"
-      }
-    ]
-  },
-
-  "exports": {
-    "SocialScheduler": {
-      "type": "durable-object",
-      "storage": "sqlite"
-    }
+  "triggers": {
+    "crons": ["* * * * *"]
   },
 
   "assets": {
