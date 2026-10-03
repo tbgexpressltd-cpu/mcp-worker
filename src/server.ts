@@ -2122,7 +2122,7 @@ function createServer(
         "TBG Motors Social",
 
       version:
-        "2.0.2"
+        "2.0.3"
     });
 
 
@@ -6071,7 +6071,7 @@ function createServer(
           "TBG Motors Social",
 
         version:
-          "2.0.2",
+          "2.0.3",
 
         features: {
           instagram: {
@@ -7121,6 +7121,25 @@ export default {
       new URL(
         request.url
       );
+
+
+    if (
+      url.pathname
+      ===
+      "/health"
+    ) {
+      return Response.json({
+        ok:
+          true,
+        service:
+          "TBG Motors Social",
+        version:
+          "2.0.3",
+        timestamp:
+          new Date()
+            .toISOString()
+      });
+    }
 
 
     if (
