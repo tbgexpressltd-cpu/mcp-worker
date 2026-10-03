@@ -567,7 +567,7 @@ function createServer(
         "TBG Motors Social",
 
       version:
-        "1.6.0"
+        "1.6.1"
     });
 
 
@@ -2704,28 +2704,87 @@ function createServer(
         }
 
 
-        const sourceResponse =
-          await fetch(
-            video_url,
-            {
-              method:
-                "GET"
-            }
+        let videoBytes:
+          ArrayBuffer;
+
+
+        const sourceUrl =
+          new URL(
+            video_url
           );
 
 
         if (
-          !sourceResponse.ok
+          sourceUrl.origin
+          ===
+          PUBLIC_WORKER_BASE
+          &&
+          sourceUrl.pathname
+            .startsWith(
+              "/media/"
+            )
         ) {
-          throw new Error(
-            `Could not download Reel source video: HTTP ${sourceResponse.status}`
-          );
+          const encodedKey =
+            sourceUrl.pathname
+              .replace(
+                /^\/media\//,
+                ""
+              );
+
+
+          const key =
+            decodeURIComponent(
+              encodedKey
+            );
+
+
+          const object =
+            await env
+              .SOCIAL_MEDIA
+              .get(
+                key
+              );
+
+
+          if (
+            !object
+            ||
+            !("body" in object)
+          ) {
+            throw new Error(
+              `Could not read Reel source from R2: ${key}`
+            );
+          }
+
+
+          videoBytes =
+            await object
+              .arrayBuffer();
+
+        } else {
+          const sourceResponse =
+            await fetch(
+              video_url,
+              {
+                method:
+                  "GET"
+              }
+            );
+
+
+          if (
+            !sourceResponse.ok
+          ) {
+            throw new Error(
+              `Could not download Reel source video: HTTP ${sourceResponse.status}`
+            );
+          }
+
+
+          videoBytes =
+            await sourceResponse
+              .arrayBuffer();
         }
-
-
-        const videoBytes =
-          await sourceResponse
-            .arrayBuffer();
 
 
         if (
