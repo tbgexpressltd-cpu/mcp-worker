@@ -1,3 +1,4 @@
+import { DurableObject } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
@@ -28,6 +29,9 @@ type Env = {
 
   // Cloudflare Media Transformations binding for trim/resize/video preparation.
   MEDIA: any;
+
+  // Cloudflare Container/Durable Object used for multi-clip FFmpeg composition.
+  VIDEO_PROCESSOR: any;
 };
 
 const INSTAGRAM_API_VERSION = "v25.0";
@@ -725,7 +729,7 @@ function createServer(
         "TBG Motors Social",
 
       version:
-        "1.7.0"
+        "1.8.0"
     });
 
 
@@ -1707,6 +1711,334 @@ function createServer(
         return result({
           ...stored,
           time_seconds,
+          original_preserved:
+            true
+        });
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // MEDIA PROCESSING — MULTI-CLIP COMPOSE / MUSIC
+  // ====================================================
+
+  server.registerTool(
+    "compose_social_video",
+
+    {
+      description:
+        "Compose 1 to 20 video clips into one social-media MP4 using the TBG Motors FFmpeg processor. Supports per-clip trimming, 9:16/1:1/4:5/16:9 output, center crop or contain-with-padding, keeping/muting original audio, and optionally mixing a user-provided or properly licensed music file. The original clips are never modified. Do not use Instagram Audio API preview/download URLs as a Facebook music source unless usage rights explicitly allow it.",
+
+      inputSchema: {
+        clips:
+          z.array(
+            z.object({
+              video_url:
+                z.string()
+                  .url(),
+
+              start_seconds:
+                z.number()
+                  .min(0)
+                  .max(600)
+                  .optional(),
+
+              duration_seconds:
+                z.number()
+                  .min(0.1)
+                  .max(90)
+                  .optional()
+            })
+          )
+          .min(1)
+          .max(20),
+
+        preset:
+          z.enum([
+            "reel_9_16",
+            "square_1_1",
+            "portrait_4_5",
+            "landscape_16_9",
+            "custom"
+          ])
+          .default(
+            "reel_9_16"
+          ),
+
+        width:
+          z.number()
+            .int()
+            .min(50)
+            .max(2000)
+            .optional(),
+
+        height:
+          z.number()
+            .int()
+            .min(50)
+            .max(2000)
+            .optional(),
+
+        fit:
+          z.enum([
+            "cover",
+            "contain"
+          ])
+          .optional(),
+
+        keep_original_audio:
+          z.boolean()
+            .optional(),
+
+        music_url:
+          z.string()
+            .url()
+            .optional(),
+
+        music_volume:
+          z.number()
+            .int()
+            .min(0)
+            .max(100)
+            .optional(),
+
+        original_audio_volume:
+          z.number()
+            .int()
+            .min(0)
+            .max(100)
+            .optional()
+      },
+
+      annotations: {
+        readOnlyHint:
+          false,
+        destructiveHint:
+          false,
+        openWorldHint:
+          true
+      }
+    },
+
+    async ({
+      clips,
+      preset,
+      width,
+      height,
+      fit,
+      keep_original_audio,
+      music_url,
+      music_volume,
+      original_audio_volume
+    }) => {
+      try {
+        const presets:
+          Record<
+            string,
+            {
+              width: number;
+              height: number;
+              fit: "cover" | "contain";
+            }
+          > = {
+            reel_9_16: {
+              width:
+                1080,
+              height:
+                1920,
+              fit:
+                "cover"
+            },
+            square_1_1: {
+              width:
+                1080,
+              height:
+                1080,
+              fit:
+                "cover"
+            },
+            portrait_4_5: {
+              width:
+                1080,
+              height:
+                1350,
+              fit:
+                "cover"
+            },
+            landscape_16_9: {
+              width:
+                1920,
+              height:
+                1080,
+              fit:
+                "contain"
+            },
+            custom: {
+              width:
+                width
+                ??
+                1080,
+              height:
+                height
+                ??
+                1920,
+              fit:
+                fit
+                ??
+                "cover"
+            }
+          };
+
+
+        const selected =
+          presets[
+            preset
+          ];
+
+
+        const targetWidth =
+          preset
+          ===
+          "custom"
+            ?
+            width
+            ??
+            selected.width
+            :
+            selected.width;
+
+
+        const targetHeight =
+          preset
+          ===
+          "custom"
+            ?
+            height
+            ??
+            selected.height
+            :
+            selected.height;
+
+
+        const targetFit =
+          fit
+          ??
+          selected.fit;
+
+
+        const processor =
+          env
+            .VIDEO_PROCESSOR
+            .getByName(
+              "tbg-social-media-processor"
+            );
+
+
+        const response =
+          await processor
+            .fetch(
+              new Request(
+                "https://media-processor/compose",
+                {
+                  method:
+                    "POST",
+                  headers: {
+                    "Content-Type":
+                      "application/json"
+                  },
+                  body:
+                    JSON.stringify({
+                      clips,
+                      width:
+                        targetWidth,
+                      height:
+                        targetHeight,
+                      fit:
+                        targetFit,
+                      keep_original_audio:
+                        keep_original_audio
+                        ??
+                        false,
+                      music_url:
+                        music_url
+                        ??
+                        null,
+                      music_volume:
+                        music_volume
+                        ??
+                        100,
+                      original_audio_volume:
+                        original_audio_volume
+                        ??
+                        30
+                    })
+                }
+              )
+            );
+
+
+        if (
+          !response.ok
+        ) {
+          const message =
+            await response
+              .text();
+
+          throw new Error(
+            `Video processor failed with HTTP ${response.status}: ${message}`
+          );
+        }
+
+
+        if (
+          !response.body
+        ) {
+          throw new Error(
+            "Video processor returned no media body."
+          );
+        }
+
+
+        const stored =
+          await storeProcessedMedia(
+            env,
+            "composed-video",
+            ".mp4",
+            response.headers
+              .get(
+                "content-type"
+              )
+            ??
+            "video/mp4",
+            response.body
+          );
+
+
+        return result({
+          ...stored,
+          clips:
+            clips.length,
+          preset,
+          width:
+            targetWidth,
+          height:
+            targetHeight,
+          fit:
+            targetFit,
+          keep_original_audio:
+            keep_original_audio
+            ??
+            false,
+          music_mixed:
+            Boolean(
+              music_url
+            ),
           original_preserved:
             true
         });
@@ -4221,6 +4553,215 @@ async function serveMedia(
       headers
     }
   );
+}
+
+
+// ======================================================
+// FFMPEG CONTAINER — MULTI-CLIP VIDEO PROCESSOR
+// ======================================================
+
+export class VideoProcessor
+  extends DurableObject<Env> {
+
+  private starting:
+    Promise<void>
+    |
+    undefined;
+
+
+  constructor(
+    ctx: DurableObjectState,
+    env: Env
+  ) {
+    super(
+      ctx,
+      env
+    );
+
+    const container =
+      ctx.container!;
+
+    if (
+      container.running
+    ) {
+      void ctx
+        .blockConcurrencyWhile(
+          () =>
+            container
+              .setInactivityTimeout(
+                15
+                *
+                60
+                *
+                1000
+              )
+        );
+    }
+  }
+
+
+  async fetch(
+    request: Request
+  ) {
+    this.starting ??=
+      this
+        .startAndWaitForPort()
+        .finally(
+          () => {
+            this.starting =
+              undefined;
+          }
+        );
+
+
+    await this.starting;
+
+
+    const url =
+      new URL(
+        request.url
+      );
+
+
+    url.protocol =
+      "http:";
+
+    url.host =
+      "container";
+
+
+    const forwarded =
+      new Request(
+        url,
+        request
+      );
+
+
+    forwarded.headers
+      .delete(
+        "host"
+      );
+
+
+    return this
+      .ctx
+      .container!
+      .getTcpPort(
+        8080
+      )
+      .fetch(
+        forwarded
+      );
+  }
+
+
+  private async startAndWaitForPort() {
+    const container =
+      this
+        .ctx
+        .container!;
+
+
+    if (
+      !container.running
+    ) {
+      container.start({
+        image:
+          container
+            .images
+            .base,
+
+        instance:
+          "lite",
+
+        enableInternet:
+          true
+      });
+    }
+
+
+    await container
+      .setInactivityTimeout(
+        15
+        *
+        60
+        *
+        1000
+      );
+
+
+    const port =
+      container
+        .getTcpPort(
+          8080
+        );
+
+
+    let lastError:
+      unknown;
+
+
+    for (
+      let attempt = 0;
+      attempt < 150;
+      attempt++
+    ) {
+      try {
+        const response =
+          await port
+            .fetch(
+              "http://container/health",
+              {
+                signal:
+                  AbortSignal
+                    .timeout(
+                      1000
+                    )
+              }
+            );
+
+
+        await response
+          .body
+          ?.cancel();
+
+
+        if (
+          !response.ok
+        ) {
+          throw new Error(
+            `Health check returned ${response.status}`
+          );
+        }
+
+
+        return;
+
+      } catch (
+        error
+      ) {
+        lastError =
+          error;
+
+        await new Promise(
+          resolve =>
+            setTimeout(
+              resolve,
+              200
+            )
+        );
+      }
+    }
+
+
+    throw new Error(
+      "Video processor container did not become ready on port 8080.",
+      {
+        cause:
+          lastError
+      }
+    );
+  }
 }
 
 
