@@ -22,6 +22,12 @@ type Env = {
   INSTAGRAM_FB_USER_ACCESS_TOKEN?: string;
 
   SOCIAL_MEDIA: R2Bucket;
+
+  // Cloudflare Images binding for crop/resize/image preparation.
+  IMAGES: any;
+
+  // Cloudflare Media Transformations binding for trim/resize/video preparation.
+  MEDIA: any;
 };
 
 const INSTAGRAM_API_VERSION = "v25.0";
@@ -111,6 +117,158 @@ function safeFileName(
     ||
     `media${extensionFromMime(mime)}`
   );
+}
+
+
+
+function getR2KeyFromPublicMediaUrl(
+  mediaUrl: string
+) {
+  try {
+    const url =
+      new URL(
+        mediaUrl
+      );
+
+    if (
+      url.origin
+      !==
+      PUBLIC_WORKER_BASE
+      ||
+      !url.pathname
+        .startsWith(
+          "/media/"
+        )
+    ) {
+      return null;
+    }
+
+    return decodeURIComponent(
+      url.pathname
+        .replace(
+          /^\/media\//,
+          ""
+        )
+    );
+
+  } catch {
+    return null;
+  }
+}
+
+
+async function getMediaInput(
+  env: Env,
+  mediaUrl: string
+) {
+  const key =
+    getR2KeyFromPublicMediaUrl(
+      mediaUrl
+    );
+
+  if (key) {
+    const object =
+      await env
+        .SOCIAL_MEDIA
+        .get(
+          key
+        );
+
+    if (
+      !object
+      ||
+      !("body" in object)
+    ) {
+      throw new Error(
+        `Media object not found in R2: ${key}`
+      );
+    }
+
+    return {
+      body:
+        object.body,
+      contentType:
+        object.httpMetadata
+          ?.contentType
+        ??
+        "application/octet-stream",
+      sourceKey:
+        key
+    };
+  }
+
+
+  const response =
+    await fetch(
+      mediaUrl
+    );
+
+  if (
+    !response.ok
+    ||
+    !response.body
+  ) {
+    throw new Error(
+      `Could not download media source: HTTP ${response.status}`
+    );
+  }
+
+  return {
+    body:
+      response.body,
+    contentType:
+      response.headers
+        .get(
+          "content-type"
+        )
+      ??
+      "application/octet-stream",
+    sourceKey:
+      null
+  };
+}
+
+
+async function storeProcessedMedia(
+  env: Env,
+  prefix: string,
+  extension: string,
+  contentType: string,
+  body: ReadableStream<Uint8Array>
+) {
+  const key =
+    `processed/${Date.now()}-${crypto.randomUUID()}-${prefix}${extension}`;
+
+  const stored =
+    await env
+      .SOCIAL_MEDIA
+      .put(
+        key,
+        body,
+        {
+          httpMetadata: {
+            contentType,
+            contentDisposition:
+              "inline",
+            cacheControl:
+              "public, max-age=3600"
+          },
+          customMetadata: {
+            processed:
+              "true"
+          }
+        }
+      );
+
+  return {
+    key,
+    size:
+      stored.size,
+    mime_type:
+      contentType,
+    url:
+      `${PUBLIC_WORKER_BASE}/media/${encodeURIComponent(key)}`
+  };
 }
 
 
@@ -567,7 +725,7 @@ function createServer(
         "TBG Motors Social",
 
       version:
-        "1.6.1"
+        "1.7.0"
     });
 
 
@@ -768,6 +926,789 @@ function createServer(
         return result({
           deleted:
             keys
+        });
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // MEDIA PROCESSING — IMAGE
+  // ====================================================
+
+  server.registerTool(
+    "process_social_image",
+
+    {
+      description:
+        "Prepare an image for TBG Motors social media using Cloudflare Images. Can crop/resize for Instagram or Facebook and optionally add a large SOLD label. The original R2 file is never modified; a processed copy is stored in R2.",
+
+      inputSchema: {
+        image_url:
+          z.string()
+            .url(),
+
+        preset:
+          z.enum([
+            "instagram_portrait",
+            "instagram_square",
+            "story_reel_cover",
+            "facebook_portrait",
+            "facebook_landscape",
+            "custom"
+          ])
+          .default(
+            "instagram_portrait"
+          ),
+
+        width:
+          z.number()
+            .int()
+            .min(50)
+            .max(3000)
+            .optional(),
+
+        height:
+          z.number()
+            .int()
+            .min(50)
+            .max(3000)
+            .optional(),
+
+        fit:
+          z.enum([
+            "cover",
+            "contain",
+            "scale-down"
+          ])
+          .optional(),
+
+        quality:
+          z.number()
+            .int()
+            .min(40)
+            .max(100)
+            .optional(),
+
+        sold:
+          z.boolean()
+            .optional(),
+
+        sold_text:
+          z.string()
+            .min(1)
+            .max(40)
+            .optional()
+      },
+
+      annotations: {
+        readOnlyHint:
+          false,
+        destructiveHint:
+          false,
+        openWorldHint:
+          false
+      }
+    },
+
+    async ({
+      image_url,
+      preset,
+      width,
+      height,
+      fit,
+      quality,
+      sold,
+      sold_text
+    }) => {
+      try {
+        const presets:
+          Record<
+            string,
+            {
+              width: number;
+              height: number;
+              fit: string;
+            }
+          > = {
+            instagram_portrait: {
+              width:
+                1080,
+              height:
+                1350,
+              fit:
+                "cover"
+            },
+            instagram_square: {
+              width:
+                1080,
+              height:
+                1080,
+              fit:
+                "cover"
+            },
+            story_reel_cover: {
+              width:
+                1080,
+              height:
+                1920,
+              fit:
+                "cover"
+            },
+            facebook_portrait: {
+              width:
+                1080,
+              height:
+                1350,
+              fit:
+                "cover"
+            },
+            facebook_landscape: {
+              width:
+                1200,
+              height:
+                630,
+              fit:
+                "cover"
+            },
+            custom: {
+              width:
+                width
+                ??
+                1080,
+              height:
+                height
+                ??
+                1350,
+              fit:
+                fit
+                ??
+                "cover"
+            }
+          };
+
+
+        const selected =
+          presets[
+            preset
+          ];
+
+
+        const targetWidth =
+          preset
+          ===
+          "custom"
+            ?
+            width
+            ??
+            selected.width
+            :
+            selected.width;
+
+
+        const targetHeight =
+          preset
+          ===
+          "custom"
+            ?
+            height
+            ??
+            selected.height
+            :
+            selected.height;
+
+
+        const targetFit =
+          fit
+          ??
+          selected.fit;
+
+
+        const source =
+          await getMediaInput(
+            env,
+            image_url
+          );
+
+
+        let pipeline:
+          any =
+          env
+            .IMAGES
+            .input(
+              source.body
+            )
+            .transform({
+              width:
+                targetWidth,
+              height:
+                targetHeight,
+              fit:
+                targetFit
+            });
+
+
+        if (sold) {
+          const label =
+            env
+              .IMAGES
+              .text(
+                sold_text
+                ??
+                "SOLD",
+                {
+                  color:
+                    "#e10600",
+                  size:
+                    Math.max(
+                      72,
+                      Math.round(
+                        targetWidth
+                        *
+                        0.18
+                      )
+                    )
+                }
+              );
+
+
+          pipeline =
+            pipeline
+              .draw(
+                label,
+                {
+                  top:
+                    Math.round(
+                      targetHeight
+                      *
+                      0.38
+                    ),
+                  left:
+                    Math.round(
+                      targetWidth
+                      *
+                      0.18
+                    ),
+                  opacity:
+                    0.96
+                }
+              );
+        }
+
+
+        const output =
+          await pipeline
+            .output({
+              format:
+                "image/jpeg",
+              quality:
+                quality
+                ??
+                90
+            });
+
+
+        const response =
+          output
+            .response();
+
+
+        if (
+          !response.body
+        ) {
+          throw new Error(
+            "Cloudflare Images returned no image body."
+          );
+        }
+
+
+        const stored =
+          await storeProcessedMedia(
+            env,
+            sold
+              ?
+              "sold-image"
+              :
+              "social-image",
+            ".jpg",
+            "image/jpeg",
+            response.body
+          );
+
+
+        return result({
+          ...stored,
+          preset,
+          width:
+            targetWidth,
+          height:
+            targetHeight,
+          fit:
+            targetFit,
+          sold:
+            Boolean(
+              sold
+            ),
+          original_preserved:
+            true
+        });
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // MEDIA PROCESSING — VIDEO
+  // ====================================================
+
+  server.registerTool(
+    "process_social_video",
+
+    {
+      description:
+        "Prepare one video for social media using Cloudflare Media Transformations. Supports trimming, resizing/cropping to 9:16 or other presets, and keeping or removing the original audio. The original file is preserved and the processed MP4 is stored in R2. This tool does not concatenate multiple clips or mix a music track yet.",
+
+      inputSchema: {
+        video_url:
+          z.string()
+            .url(),
+
+        preset:
+          z.enum([
+            "reel_9_16",
+            "square_1_1",
+            "portrait_4_5",
+            "landscape_16_9",
+            "custom"
+          ])
+          .default(
+            "reel_9_16"
+          ),
+
+        width:
+          z.number()
+            .int()
+            .min(50)
+            .max(2000)
+            .optional(),
+
+        height:
+          z.number()
+            .int()
+            .min(50)
+            .max(2000)
+            .optional(),
+
+        fit:
+          z.enum([
+            "cover",
+            "contain",
+            "scale-down"
+          ])
+          .optional(),
+
+        start_seconds:
+          z.number()
+            .min(0)
+            .max(600)
+            .optional(),
+
+        duration_seconds:
+          z.number()
+            .min(1)
+            .max(60)
+            .optional(),
+
+        keep_original_audio:
+          z.boolean()
+            .optional()
+      },
+
+      annotations: {
+        readOnlyHint:
+          false,
+        destructiveHint:
+          false,
+        openWorldHint:
+          false
+      }
+    },
+
+    async ({
+      video_url,
+      preset,
+      width,
+      height,
+      fit,
+      start_seconds,
+      duration_seconds,
+      keep_original_audio
+    }) => {
+      try {
+        const presets:
+          Record<
+            string,
+            {
+              width: number;
+              height: number;
+              fit: string;
+            }
+          > = {
+            reel_9_16: {
+              width:
+                1080,
+              height:
+                1920,
+              fit:
+                "cover"
+            },
+            square_1_1: {
+              width:
+                1080,
+              height:
+                1080,
+              fit:
+                "cover"
+            },
+            portrait_4_5: {
+              width:
+                1080,
+              height:
+                1350,
+              fit:
+                "cover"
+            },
+            landscape_16_9: {
+              width:
+                1920,
+              height:
+                1080,
+              fit:
+                "contain"
+            },
+            custom: {
+              width:
+                width
+                ??
+                1080,
+              height:
+                height
+                ??
+                1920,
+              fit:
+                fit
+                ??
+                "cover"
+            }
+          };
+
+
+        const selected =
+          presets[
+            preset
+          ];
+
+
+        const targetWidth =
+          preset
+          ===
+          "custom"
+            ?
+            width
+            ??
+            selected.width
+            :
+            selected.width;
+
+
+        const targetHeight =
+          preset
+          ===
+          "custom"
+            ?
+            height
+            ??
+            selected.height
+            :
+            selected.height;
+
+
+        const targetFit =
+          fit
+          ??
+          selected.fit;
+
+
+        const source =
+          await getMediaInput(
+            env,
+            video_url
+          );
+
+
+        const outputOptions:
+          Record<
+            string,
+            unknown
+          > = {
+            mode:
+              "video",
+            audio:
+              keep_original_audio
+              ??
+              true
+          };
+
+
+        if (
+          start_seconds
+          !==
+          undefined
+        ) {
+          outputOptions.time =
+            `${start_seconds}s`;
+        }
+
+
+        if (
+          duration_seconds
+          !==
+          undefined
+        ) {
+          outputOptions.duration =
+            `${duration_seconds}s`;
+        }
+
+
+        const transformed =
+          env
+            .MEDIA
+            .input(
+              source.body
+            )
+            .transform({
+              width:
+                targetWidth,
+              height:
+                targetHeight,
+              fit:
+                targetFit
+            })
+            .output(
+              outputOptions
+            );
+
+
+        const contentType =
+          await transformed
+            .contentType();
+
+
+        const media =
+          await transformed
+            .media();
+
+
+        const stored =
+          await storeProcessedMedia(
+            env,
+            "social-video",
+            ".mp4",
+            contentType
+              ||
+              "video/mp4",
+            media
+          );
+
+
+        return result({
+          ...stored,
+          preset,
+          width:
+            targetWidth,
+          height:
+            targetHeight,
+          fit:
+            targetFit,
+          start_seconds:
+            start_seconds
+            ??
+            0,
+          duration_seconds:
+            duration_seconds
+            ??
+            null,
+          keep_original_audio:
+            keep_original_audio
+            ??
+            true,
+          original_preserved:
+            true
+        });
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // MEDIA PROCESSING — VIDEO FRAME / COVER
+  // ====================================================
+
+  server.registerTool(
+    "extract_social_video_frame",
+
+    {
+      description:
+        "Extract a JPEG still frame from a video for a Reel cover or social thumbnail. Stores the frame in R2 and returns its public URL.",
+
+      inputSchema: {
+        video_url:
+          z.string()
+            .url(),
+
+        time_seconds:
+          z.number()
+            .min(0)
+            .max(600)
+            .default(
+              1
+            ),
+
+        width:
+          z.number()
+            .int()
+            .min(50)
+            .max(2000)
+            .optional(),
+
+        height:
+          z.number()
+            .int()
+            .min(50)
+            .max(2000)
+            .optional(),
+
+        fit:
+          z.enum([
+            "cover",
+            "contain",
+            "scale-down"
+          ])
+          .optional()
+      },
+
+      annotations: {
+        readOnlyHint:
+          false,
+        destructiveHint:
+          false,
+        openWorldHint:
+          false
+      }
+    },
+
+    async ({
+      video_url,
+      time_seconds,
+      width,
+      height,
+      fit
+    }) => {
+      try {
+        const source =
+          await getMediaInput(
+            env,
+            video_url
+          );
+
+
+        let media:
+          any =
+          env
+            .MEDIA
+            .input(
+              source.body
+            );
+
+
+        if (
+          width
+          ||
+          height
+        ) {
+          media =
+            media
+              .transform({
+                width:
+                  width
+                  ??
+                  1080,
+                height:
+                  height
+                  ??
+                  1920,
+                fit:
+                  fit
+                  ??
+                  "cover"
+              });
+        }
+
+
+        const frame =
+          media
+            .output({
+              mode:
+                "frame",
+              time:
+                `${time_seconds}s`,
+              format:
+                "jpg"
+            });
+
+
+        const contentType =
+          await frame
+            .contentType();
+
+
+        const body =
+          await frame
+            .media();
+
+
+        const stored =
+          await storeProcessedMedia(
+            env,
+            "video-cover",
+            ".jpg",
+            contentType
+              ||
+              "image/jpeg",
+            body
+          );
+
+
+        return result({
+          ...stored,
+          time_seconds,
+          original_preserved:
+            true
         });
 
       } catch (error) {
