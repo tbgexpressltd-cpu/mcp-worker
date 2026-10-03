@@ -829,6 +829,1234 @@ function normalizeInstagramAudio(
 }
 
 
+
+type SocialScheduleContent = {
+  platforms: Array<
+    "instagram"
+    |
+    "facebook"
+  >;
+
+  content_type:
+    "photo"
+    |
+    "reel"
+    |
+    "video"
+    |
+    "text";
+
+  caption?: string;
+  title?: string;
+  image_urls?: string[];
+  video_url?: string;
+  cover_url?: string;
+  share_to_feed?: boolean;
+
+  audio_configuration?: {
+    audio_id: string;
+    audio_volume?: number;
+    video_volume?: number;
+    should_loop_audio?: boolean;
+  };
+};
+
+
+type SocialScheduleJob = {
+  id: string;
+  scheduled_at: string;
+  next_run_at: string;
+  status:
+    "scheduled"
+    |
+    "processing"
+    |
+    "completed"
+    |
+    "cancelled"
+    |
+    "failed";
+  content: SocialScheduleContent;
+  progress: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+  error?: string;
+};
+
+
+async function uploadFacebookReelBytes(
+  env: Env,
+  pageToken: string,
+  videoUrl: string
+) {
+  const start =
+    (await graphPost(
+      FACEBOOK_GRAPH,
+      pageToken,
+      `${FACEBOOK_PAGE_ID}/video_reels`,
+      {
+        upload_phase:
+          "start"
+      }
+    )) as {
+      video_id?: string;
+      upload_url?: string;
+    };
+
+
+  if (
+    !start.video_id
+    ||
+    !start.upload_url
+  ) {
+    throw new Error(
+      "Meta did not return a Facebook Reel video_id and upload_url."
+    );
+  }
+
+
+  const source =
+    await getMediaInput(
+      env,
+      videoUrl
+    );
+
+
+  const bytes =
+    await new Response(
+      source.body
+    )
+      .arrayBuffer();
+
+
+  if (
+    bytes.byteLength
+    ===
+    0
+  ) {
+    throw new Error(
+      "Facebook Reel source video is empty."
+    );
+  }
+
+
+  const uploadResponse =
+    await fetch(
+      start.upload_url,
+      {
+        method:
+          "POST",
+
+        headers: {
+          Authorization:
+            `OAuth ${pageToken}`,
+
+          offset:
+            "0",
+
+          file_size:
+            String(
+              bytes.byteLength
+            ),
+
+          "Content-Type":
+            "application/octet-stream"
+        },
+
+        body:
+          bytes
+      }
+    );
+
+
+  const uploadText =
+    await uploadResponse
+      .text();
+
+
+  let uploadData:
+    any;
+
+  try {
+    uploadData =
+      uploadText
+        ?
+        JSON.parse(
+          uploadText
+        )
+        :
+        {};
+  } catch {
+    uploadData = {
+      raw:
+        uploadText
+    };
+  }
+
+
+  if (
+    !uploadResponse.ok
+  ) {
+    const message =
+      uploadData
+        ?.error
+        ?.message
+      ??
+      uploadData
+        ?.debug_info
+        ?.message
+      ??
+      uploadData
+        ?.message
+      ??
+      uploadText
+      ??
+      `Facebook Reel upload failed with HTTP ${uploadResponse.status}`;
+
+    throw new Error(
+      String(
+        message
+      )
+    );
+  }
+
+
+  return {
+    video_id:
+      start.video_id,
+
+    upload_result:
+      uploadData
+  };
+}
+
+
+async function publishScheduledFacebook(
+  env: Env,
+  content: SocialScheduleContent
+) {
+  const pageToken =
+    await getFacebookPageAccessToken(
+      env
+    );
+
+
+  if (
+    content.content_type
+    ===
+    "text"
+  ) {
+    if (
+      !content.caption
+    ) {
+      throw new Error(
+        "Facebook text post requires caption."
+      );
+    }
+
+    return await graphPost(
+      FACEBOOK_GRAPH,
+      pageToken,
+      `${FACEBOOK_PAGE_ID}/feed`,
+      {
+        message:
+          content.caption,
+
+        published:
+          true
+      }
+    );
+  }
+
+
+  if (
+    content.content_type
+    ===
+    "photo"
+  ) {
+    const urls =
+      content.image_urls
+      ??
+      [];
+
+    if (
+      urls.length
+      <
+      1
+      ||
+      urls.length
+      >
+      10
+    ) {
+      throw new Error(
+        "Facebook photo post requires 1 to 10 image URLs."
+      );
+    }
+
+
+    const ids:
+      string[] =
+      [];
+
+
+    for (
+      const imageUrl
+      of urls
+    ) {
+      const prepared =
+        (await graphPost(
+          FACEBOOK_GRAPH,
+          pageToken,
+          `${FACEBOOK_PAGE_ID}/photos`,
+          {
+            url:
+              imageUrl,
+
+            published:
+              false
+          }
+        )) as {
+          id?: string;
+        };
+
+
+      if (
+        !prepared.id
+      ) {
+        throw new Error(
+          "Meta did not return a Facebook photo ID."
+        );
+      }
+
+
+      ids.push(
+        prepared.id
+      );
+    }
+
+
+    const form:
+      Record<
+        string,
+        string
+      > = {};
+
+
+    if (
+      content.caption
+    ) {
+      form.message =
+        content.caption;
+    }
+
+
+    ids.forEach(
+      (
+        id,
+        index
+      ) => {
+        form[
+          `attached_media[${index}]`
+        ] =
+          JSON.stringify({
+            media_fbid:
+              id
+          });
+      }
+    );
+
+
+    return await graphPostForm(
+      FACEBOOK_GRAPH,
+      pageToken,
+      `${FACEBOOK_PAGE_ID}/feed`,
+      form
+    );
+  }
+
+
+  if (
+    !content.video_url
+  ) {
+    throw new Error(
+      "Facebook video/Reel schedule requires video_url."
+    );
+  }
+
+
+  if (
+    content.content_type
+    ===
+    "video"
+  ) {
+    const form:
+      Record<
+        string,
+        string
+      > = {
+        file_url:
+          content.video_url,
+
+        published:
+          "true"
+      };
+
+
+    if (
+      content.caption
+    ) {
+      form.description =
+        content.caption;
+    }
+
+
+    if (
+      content.title
+    ) {
+      form.title =
+        content.title;
+    }
+
+
+    return await graphPostForm(
+      FACEBOOK_GRAPH,
+      pageToken,
+      `${FACEBOOK_PAGE_ID}/videos`,
+      form
+    );
+  }
+
+
+  const prepared =
+    await uploadFacebookReelBytes(
+      env,
+      pageToken,
+      content.video_url
+    );
+
+
+  const publishBody:
+    Record<
+      string,
+      unknown
+    > = {
+      video_id:
+        prepared.video_id,
+
+      upload_phase:
+        "finish",
+
+      video_state:
+        "PUBLISHED"
+    };
+
+
+  if (
+    content.caption
+  ) {
+    publishBody.description =
+      content.caption;
+  }
+
+
+  if (
+    content.title
+  ) {
+    publishBody.title =
+      content.title;
+  }
+
+
+  const published =
+    await graphPost(
+      FACEBOOK_GRAPH,
+      pageToken,
+      `${FACEBOOK_PAGE_ID}/video_reels`,
+      publishBody
+    );
+
+
+  let thumbnail:
+    any =
+    null;
+
+
+  if (
+    content.cover_url
+  ) {
+    try {
+      thumbnail =
+        await setFacebookPreferredThumbnailFromUrl(
+          env,
+          pageToken,
+          prepared.video_id,
+          content.cover_url
+        );
+    } catch (
+      error
+    ) {
+      thumbnail = {
+        warning:
+          error instanceof Error
+            ?
+            error.message
+            :
+            "Could not set Facebook thumbnail."
+      };
+    }
+  }
+
+
+  return {
+    ...published as any,
+
+    video_id:
+      prepared.video_id,
+
+    thumbnail
+  };
+}
+
+
+async function createScheduledInstagramContainer(
+  env: Env,
+  content: SocialScheduleContent
+) {
+  if (
+    content.content_type
+    ===
+    "text"
+  ) {
+    throw new Error(
+      "Instagram does not support text-only publishing."
+    );
+  }
+
+
+  if (
+    content.content_type
+    ===
+    "photo"
+  ) {
+    const urls =
+      content.image_urls
+      ??
+      [];
+
+
+    if (
+      urls.length
+      <
+      1
+      ||
+      urls.length
+      >
+      10
+    ) {
+      throw new Error(
+        "Instagram photo schedule requires 1 to 10 image URLs."
+      );
+    }
+
+
+    const igId =
+      await getInstagramUserId(
+        env
+      );
+
+
+    if (
+      urls.length
+      ===
+      1
+    ) {
+      const data:
+        any =
+        await graphPost(
+          INSTAGRAM_GRAPH,
+          env.META_ACCESS_TOKEN,
+          `${igId}/media`,
+          {
+            image_url:
+              urls[0],
+
+            ...(content.caption
+              ?
+              {
+                caption:
+                  content.caption
+              }
+              :
+              {})
+          }
+        );
+
+
+      return {
+        creation_id:
+          data.id,
+
+        api_mode:
+          "instagram_login"
+      };
+    }
+
+
+    const childIds:
+      string[] =
+      [];
+
+
+    for (
+      const imageUrl
+      of urls
+    ) {
+      const child:
+        any =
+        await graphPost(
+          INSTAGRAM_GRAPH,
+          env.META_ACCESS_TOKEN,
+          `${igId}/media`,
+          {
+            image_url:
+              imageUrl,
+
+            is_carousel_item:
+              true
+          }
+        );
+
+
+      if (
+        !child.id
+      ) {
+        throw new Error(
+          "Meta did not return an Instagram carousel child ID."
+        );
+      }
+
+
+      childIds.push(
+        child.id
+      );
+    }
+
+
+    const parent:
+      any =
+      await graphPost(
+        INSTAGRAM_GRAPH,
+        env.META_ACCESS_TOKEN,
+        `${igId}/media`,
+        {
+          media_type:
+            "CAROUSEL",
+
+          children:
+            childIds.join(","),
+
+          ...(content.caption
+            ?
+            {
+              caption:
+                content.caption
+            }
+            :
+            {})
+        }
+      );
+
+
+    return {
+      creation_id:
+        parent.id,
+
+      api_mode:
+        "instagram_login"
+    };
+  }
+
+
+  if (
+    !content.video_url
+  ) {
+    throw new Error(
+      "Instagram Reel schedule requires video_url."
+    );
+  }
+
+
+  if (
+    content.audio_configuration
+  ) {
+    const token =
+      requireInstagramFacebookUserToken(
+        env
+      );
+
+
+    const igId =
+      await getFacebookLoginInstagramUserId(
+        env
+      );
+
+
+    const audioConfig:
+      Record<
+        string,
+        unknown
+      > = {
+        audio_id:
+          content
+            .audio_configuration
+            .audio_id
+      };
+
+
+    if (
+      content
+        .audio_configuration
+        .audio_volume
+      !==
+      undefined
+    ) {
+      audioConfig.audio_volume =
+        content
+          .audio_configuration
+          .audio_volume;
+    }
+
+
+    if (
+      content
+        .audio_configuration
+        .video_volume
+      !==
+      undefined
+    ) {
+      audioConfig.video_volume =
+        content
+          .audio_configuration
+          .video_volume;
+    }
+
+
+    if (
+      content
+        .audio_configuration
+        .should_loop_audio
+      !==
+      undefined
+    ) {
+      audioConfig.should_loop_audio =
+        content
+          .audio_configuration
+          .should_loop_audio;
+    }
+
+
+    const form:
+      Record<
+        string,
+        string
+      > = {
+        media_type:
+          "REELS",
+
+        video_url:
+          content.video_url,
+
+        audio_configuration:
+          JSON.stringify(
+            audioConfig
+          )
+      };
+
+
+    if (
+      content.caption
+    ) {
+      form.caption =
+        content.caption;
+    }
+
+
+    if (
+      content.cover_url
+    ) {
+      form.cover_url =
+        content.cover_url;
+    }
+
+
+    if (
+      content.share_to_feed
+      !==
+      undefined
+    ) {
+      form.share_to_feed =
+        String(
+          content.share_to_feed
+        );
+    }
+
+
+    const data:
+      any =
+      await graphPostForm(
+        FACEBOOK_GRAPH,
+        token,
+        `${igId}/media`,
+        form
+      );
+
+
+    return {
+      creation_id:
+        data.id,
+
+      api_mode:
+        "facebook_login"
+    };
+  }
+
+
+  const igId =
+    await getInstagramUserId(
+      env
+    );
+
+
+  const body:
+    Record<
+      string,
+      unknown
+    > = {
+      media_type:
+        "REELS",
+
+      video_url:
+        content.video_url
+    };
+
+
+  if (
+    content.caption
+  ) {
+    body.caption =
+      content.caption;
+  }
+
+
+  if (
+    content.cover_url
+  ) {
+    body.cover_url =
+      content.cover_url;
+  }
+
+
+  if (
+    content.share_to_feed
+    !==
+    undefined
+  ) {
+    body.share_to_feed =
+      content.share_to_feed;
+  }
+
+
+  const data:
+    any =
+    await graphPost(
+      INSTAGRAM_GRAPH,
+      env.META_ACCESS_TOKEN,
+      `${igId}/media`,
+      body
+    );
+
+
+  return {
+    creation_id:
+      data.id,
+
+    api_mode:
+      "instagram_login"
+  };
+}
+
+
+async function checkScheduledInstagramContainer(
+  env: Env,
+  creationId: string,
+  apiMode: string
+) {
+  if (
+    apiMode
+    ===
+    "facebook_login"
+  ) {
+    const token =
+      requireInstagramFacebookUserToken(
+        env
+      );
+
+
+    return await graphGet(
+      FACEBOOK_GRAPH,
+      token,
+      creationId,
+      {
+        fields:
+          "id,status_code"
+      }
+    );
+  }
+
+
+  return await graphGet(
+    INSTAGRAM_GRAPH,
+    env.META_ACCESS_TOKEN,
+    creationId,
+    {
+      fields:
+        "id,status_code"
+    }
+  );
+}
+
+
+async function publishScheduledInstagramContainer(
+  env: Env,
+  creationId: string,
+  apiMode: string
+) {
+  if (
+    apiMode
+    ===
+    "facebook_login"
+  ) {
+    const token =
+      requireInstagramFacebookUserToken(
+        env
+      );
+
+
+    const igId =
+      await getFacebookLoginInstagramUserId(
+        env
+      );
+
+
+    return await graphPostForm(
+      FACEBOOK_GRAPH,
+      token,
+      `${igId}/media_publish`,
+      {
+        creation_id:
+          creationId
+      }
+    );
+  }
+
+
+  const igId =
+    await getInstagramUserId(
+      env
+    );
+
+
+  return await graphPost(
+    INSTAGRAM_GRAPH,
+    env.META_ACCESS_TOKEN,
+    `${igId}/media_publish`,
+    {
+      creation_id:
+        creationId
+    }
+  );
+}
+
+
+async function runScheduledSocialJob(
+  env: Env,
+  job: SocialScheduleJob
+) {
+  const progress =
+    job.progress
+    ??
+    {};
+
+
+  for (
+    const platform
+    of job.content.platforms
+  ) {
+    if (
+      progress[
+        platform
+      ]
+        ?.status
+      ===
+      "completed"
+    ) {
+      continue;
+    }
+
+
+    if (
+      platform
+      ===
+      "facebook"
+    ) {
+      const published =
+        await publishScheduledFacebook(
+          env,
+          job.content
+        );
+
+
+      progress.facebook = {
+        status:
+          "completed",
+
+        result:
+          published
+      };
+
+
+      continue;
+    }
+
+
+    const instagram =
+      progress.instagram
+      ??
+      {
+        status:
+          "not_started",
+
+        poll_attempts:
+          0
+      };
+
+
+    if (
+      !instagram.creation_id
+    ) {
+      const prepared =
+        await createScheduledInstagramContainer(
+          env,
+          job.content
+        );
+
+
+      instagram.creation_id =
+        prepared.creation_id;
+
+      instagram.api_mode =
+        prepared.api_mode;
+
+      instagram.status =
+        "processing";
+
+      instagram.poll_attempts =
+        0;
+
+      progress.instagram =
+        instagram;
+
+
+      return {
+        completed:
+          false,
+
+        progress,
+
+        next_run_at:
+          new Date(
+            Date.now()
+            +
+            15_000
+          )
+            .toISOString()
+      };
+    }
+
+
+    const checked:
+      any =
+      await checkScheduledInstagramContainer(
+        env,
+        instagram.creation_id,
+        instagram.api_mode
+      );
+
+
+    if (
+      checked
+        ?.status_code
+      ===
+      "FINISHED"
+    ) {
+      const published =
+        await publishScheduledInstagramContainer(
+          env,
+          instagram.creation_id,
+          instagram.api_mode
+        );
+
+
+      progress.instagram = {
+        ...instagram,
+
+        status:
+          "completed",
+
+        result:
+          published
+      };
+
+
+      continue;
+    }
+
+
+    if (
+      checked
+        ?.status_code
+      ===
+      "ERROR"
+    ) {
+      throw new Error(
+        "Instagram scheduled media container failed processing."
+      );
+    }
+
+
+    instagram.poll_attempts =
+      (
+        instagram.poll_attempts
+        ??
+        0
+      )
+      +
+      1;
+
+
+    if (
+      instagram.poll_attempts
+      >
+      40
+    ) {
+      throw new Error(
+        "Instagram scheduled media did not finish processing in time."
+      );
+    }
+
+
+    instagram.status =
+      "processing";
+
+    progress.instagram =
+      instagram;
+
+
+    return {
+      completed:
+        false,
+
+      progress,
+
+      next_run_at:
+        new Date(
+          Date.now()
+          +
+          15_000
+        )
+          .toISOString()
+    };
+  }
+
+
+  return {
+    completed:
+      true,
+
+    progress,
+
+    next_run_at:
+      job.next_run_at
+  };
+}
+
+
+async function schedulerRequest(
+  env: Env,
+  method: string,
+  path: string,
+  body?: unknown
+) {
+  const scheduler =
+    env
+      .SOCIAL_SCHEDULER
+      .getByName(
+        "tbg-motors-social"
+      );
+
+
+  const response =
+    await scheduler
+      .fetch(
+        new Request(
+          `https://scheduler${path}`,
+          {
+            method,
+
+            headers:
+              body
+                ?
+                {
+                  "Content-Type":
+                    "application/json"
+                }
+                :
+                undefined,
+
+            body:
+              body
+                ?
+                JSON.stringify(
+                  body
+                )
+                :
+                undefined
+          }
+        )
+      );
+
+
+  const data =
+    await response
+      .json();
+
+
+  if (
+    !response.ok
+  ) {
+    throw new Error(
+      (data as any)
+        ?.error
+      ??
+      `Scheduler failed with HTTP ${response.status}`
+    );
+  }
+
+
+  return data;
+}
+
+
 // ======================================================
 // MCP RESPONSE HELPERS
 // ======================================================
@@ -894,7 +2122,7 @@ function createServer(
         "TBG Motors Social",
 
       version:
-        "1.9.1"
+        "2.0.0"
     });
 
 
@@ -4366,6 +5594,403 @@ function createServer(
             INSTAGRAM_GRAPH,
             env.META_ACCESS_TOKEN,
             media_id
+          )
+        );
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // SCHEDULING — CREATE
+  // ====================================================
+
+  server.registerTool(
+    "schedule_social_post",
+
+    {
+      description:
+        "Schedule a future TBG Motors Instagram and/or Facebook publication. The job is persisted in a Cloudflare Durable Object and runs automatically at the requested ISO timestamp without reopening ChatGPT. Use photo for 1-10 images, reel for Reels, video for an ordinary Facebook video, or text for Facebook text-only. Final publication happens automatically at the scheduled time, so only schedule after explicit user approval.",
+
+      inputSchema: {
+        scheduled_at:
+          z.string()
+            .min(1),
+
+        platforms:
+          z.array(
+            z.enum([
+              "instagram",
+              "facebook"
+            ])
+          )
+          .min(1)
+          .max(2),
+
+        content_type:
+          z.enum([
+            "photo",
+            "reel",
+            "video",
+            "text"
+          ]),
+
+        caption:
+          z.string()
+            .max(2200)
+            .optional(),
+
+        title:
+          z.string()
+            .max(500)
+            .optional(),
+
+        image_urls:
+          z.array(
+            z.string()
+              .url()
+          )
+          .max(10)
+          .optional(),
+
+        video_url:
+          z.string()
+            .url()
+            .optional(),
+
+        cover_url:
+          z.string()
+            .url()
+            .optional(),
+
+        share_to_feed:
+          z.boolean()
+            .optional(),
+
+        audio_configuration:
+          z.object({
+            audio_id:
+              z.string()
+                .min(1),
+
+            audio_volume:
+              z.number()
+                .int()
+                .min(0)
+                .max(100)
+                .optional(),
+
+            video_volume:
+              z.number()
+                .int()
+                .min(0)
+                .max(100)
+                .optional(),
+
+            should_loop_audio:
+              z.boolean()
+                .optional()
+          })
+          .optional()
+      }
+    },
+
+    async ({
+      scheduled_at,
+      platforms,
+      content_type,
+      caption,
+      title,
+      image_urls,
+      video_url,
+      cover_url,
+      share_to_feed,
+      audio_configuration
+    }) => {
+      try {
+        const when =
+          new Date(
+            scheduled_at
+          );
+
+
+        if (
+          Number.isNaN(
+            when.getTime()
+          )
+        ) {
+          throw new Error(
+            "scheduled_at must be a valid ISO date-time."
+          );
+        }
+
+
+        if (
+          when.getTime()
+          <=
+          Date.now()
+        ) {
+          throw new Error(
+            "scheduled_at must be in the future."
+          );
+        }
+
+
+        if (
+          content_type
+          ===
+          "text"
+          &&
+          platforms.includes(
+            "instagram"
+          )
+        ) {
+          throw new Error(
+            "Instagram does not support text-only scheduled posts."
+          );
+        }
+
+
+        if (
+          content_type
+          ===
+          "photo"
+          &&
+          (
+            !image_urls
+            ||
+            image_urls.length
+            <
+            1
+          )
+        ) {
+          throw new Error(
+            "Photo scheduling requires at least one image URL."
+          );
+        }
+
+
+        if (
+          (
+            content_type
+            ===
+            "reel"
+            ||
+            content_type
+            ===
+            "video"
+          )
+          &&
+          !video_url
+        ) {
+          throw new Error(
+            "Video/Reel scheduling requires video_url."
+          );
+        }
+
+
+        return result(
+          await schedulerRequest(
+            env,
+            "POST",
+            "/jobs",
+            {
+              scheduled_at:
+                when.toISOString(),
+
+              content: {
+                platforms,
+                content_type,
+                caption,
+                title,
+                image_urls,
+                video_url,
+                cover_url,
+                share_to_feed,
+                audio_configuration
+              }
+            }
+          )
+        );
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // SCHEDULING — LIST
+  // ====================================================
+
+  server.registerTool(
+    "list_scheduled_social_posts",
+
+    {
+      description:
+        "List persisted TBG Motors scheduled social-media jobs and their current status. Read-only.",
+
+      inputSchema: {
+        status:
+          z.enum([
+            "all",
+            "scheduled",
+            "processing",
+            "completed",
+            "cancelled",
+            "failed"
+          ])
+          .optional()
+      },
+
+      annotations: {
+        readOnlyHint:
+          true
+      }
+    },
+
+    async ({
+      status
+    }) => {
+      try {
+        const query =
+          status
+          &&
+          status
+          !==
+          "all"
+            ?
+            `?status=${encodeURIComponent(status)}`
+            :
+            "";
+
+
+        return result(
+          await schedulerRequest(
+            env,
+            "GET",
+            `/jobs${query}`
+          )
+        );
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // SCHEDULING — MOVE
+  // ====================================================
+
+  server.registerTool(
+    "move_scheduled_social_post",
+
+    {
+      description:
+        "Move one not-yet-started TBG Motors scheduled social-media job to a new ISO date-time. Only use after explicit user approval.",
+
+      inputSchema: {
+        job_id:
+          z.string()
+            .min(1),
+
+        scheduled_at:
+          z.string()
+            .min(1)
+      }
+    },
+
+    async ({
+      job_id,
+      scheduled_at
+    }) => {
+      try {
+        const when =
+          new Date(
+            scheduled_at
+          );
+
+
+        if (
+          Number.isNaN(
+            when.getTime()
+          )
+          ||
+          when.getTime()
+          <=
+          Date.now()
+        ) {
+          throw new Error(
+            "scheduled_at must be a valid future ISO date-time."
+          );
+        }
+
+
+        return result(
+          await schedulerRequest(
+            env,
+            "PATCH",
+            `/jobs/${encodeURIComponent(job_id)}`,
+            {
+              scheduled_at:
+                when.toISOString()
+            }
+          )
+        );
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // SCHEDULING — CANCEL
+  // ====================================================
+
+  server.registerTool(
+    "cancel_scheduled_social_post",
+
+    {
+      description:
+        "Cancel one not-yet-completed TBG Motors scheduled social-media job. Only use after explicit user approval.",
+
+      inputSchema: {
+        job_id:
+          z.string()
+            .min(1)
+      },
+
+      annotations: {
+        destructiveHint:
+          true
+      }
+    },
+
+    async ({
+      job_id
+    }) => {
+      try {
+        return result(
+          await schedulerRequest(
+            env,
+            "DELETE",
+            `/jobs/${encodeURIComponent(job_id)}`
           )
         );
 
