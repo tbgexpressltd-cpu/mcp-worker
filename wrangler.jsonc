@@ -12,6 +12,14 @@
     }
   ],
 
+  "images": {
+    "binding": "IMAGES"
+  },
+
+  "media": {
+    "binding": "MEDIA"
+  },
+
   "assets": {
     "not_found_handling": "single-page-application",
     "run_worker_first": [
