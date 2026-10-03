@@ -2122,7 +2122,7 @@ function createServer(
         "TBG Motors Social",
 
       version:
-        "2.0.0"
+        "2.0.1"
     });
 
 
@@ -5375,6 +5375,11 @@ function createServer(
 
         title:
           z.string()
+            .optional(),
+
+        cover_url:
+          z.string()
+            .url()
             .optional()
       }
     },
@@ -5382,7 +5387,8 @@ function createServer(
     async ({
       video_id,
       description,
-      title
+      title,
+      cover_url
     }) => {
       try {
         const pageToken =
@@ -5418,14 +5424,37 @@ function createServer(
         }
 
 
-        return result(
+        const published =
           await graphPost(
             FACEBOOK_GRAPH,
             pageToken,
             `${FACEBOOK_PAGE_ID}/video_reels`,
             body
-          )
-        );
+          );
+
+
+        let thumbnail:
+          any =
+          null;
+
+
+        if (
+          cover_url
+        ) {
+          thumbnail =
+            await setFacebookPreferredThumbnailFromUrl(
+              env,
+              pageToken,
+              video_id,
+              cover_url
+            );
+        }
+
+
+        return result({
+          ...published as any,
+          thumbnail
+        });
 
       } catch (error) {
         return errorResult(
@@ -5999,6 +6028,101 @@ function createServer(
           error
         );
       }
+    }
+  );
+
+
+  // ====================================================
+  // SYSTEM — CAPABILITIES
+  // ====================================================
+
+  server.registerTool(
+    "get_social_capabilities",
+
+    {
+      description:
+        "Read the deployed TBG Motors Social MCP version and supported feature set. Read-only.",
+
+      inputSchema:
+        {},
+
+      annotations: {
+        readOnlyHint:
+          true
+      }
+    },
+
+    async () => {
+      return result({
+        name:
+          "TBG Motors Social",
+
+        version:
+          "2.0.1",
+
+        features: {
+          instagram: {
+            photos:
+              true,
+            carousels:
+              true,
+            reels:
+              true,
+            trending_music:
+              true,
+            custom_reel_cover:
+              true,
+            delete_media:
+              true
+          },
+
+          facebook: {
+            photo_posts:
+              true,
+            ordinary_video:
+              true,
+            reels:
+              true,
+            custom_video_thumbnail:
+              true,
+            delete_content:
+              true
+          },
+
+          processing: {
+            image_crop_resize:
+              true,
+            standard_sold_overlay:
+              true,
+            video_trim_resize:
+              true,
+            reel_cover_frame:
+              true,
+            multi_clip_compose:
+              false
+          },
+
+          scheduling: {
+            persistent:
+              true,
+            list:
+              true,
+            move:
+              true,
+            cancel:
+              true,
+            instagram_and_facebook:
+              true
+          },
+
+          storage: {
+            r2:
+              true,
+            google_drive_source_via_chatgpt_connector:
+              true
+          }
+        }
+      });
     }
   );
 
