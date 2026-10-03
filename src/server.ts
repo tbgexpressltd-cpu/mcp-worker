@@ -448,6 +448,168 @@ async function graphPostForm(
 }
 
 
+
+async function graphDelete(
+  baseUrl: string,
+  token: string,
+  path: string
+) {
+  const url =
+    `${baseUrl}/${path.replace(/^\/+/, "")}`;
+
+  const response =
+    await fetch(
+      url,
+      {
+        method:
+          "DELETE",
+
+        headers: {
+          Authorization:
+            `Bearer ${token}`
+        }
+      }
+    );
+
+  const text =
+    await response
+      .text();
+
+  let data:
+    any;
+
+  try {
+    data =
+      text
+        ?
+        JSON.parse(
+          text
+        )
+        :
+        {
+          success:
+            response.ok
+        };
+  } catch {
+    data = {
+      success:
+        response.ok,
+      raw:
+        text
+    };
+  }
+
+  if (
+    !response.ok
+  ) {
+    const message =
+      data
+        ?.error
+        ?.message
+      ??
+      `Meta API DELETE failed with HTTP ${response.status}`;
+
+    throw new Error(
+      message
+    );
+  }
+
+  return data;
+}
+
+
+async function setFacebookPreferredThumbnailFromUrl(
+  env: Env,
+  pageToken: string,
+  videoId: string,
+  imageUrl: string
+) {
+  const source =
+    await getMediaInput(
+      env,
+      imageUrl
+    );
+
+  const bytes =
+    await new Response(
+      source.body
+    )
+      .arrayBuffer();
+
+  if (
+    bytes.byteLength
+    ===
+    0
+  ) {
+    throw new Error(
+      "Facebook thumbnail source image is empty."
+    );
+  }
+
+  const form =
+    new FormData();
+
+  form.append(
+    "source",
+    new Blob(
+      [
+        bytes
+      ],
+      {
+        type:
+          source.contentType
+          ||
+          "image/jpeg"
+      }
+    ),
+    "thumbnail.jpg"
+  );
+
+  form.append(
+    "is_preferred",
+    "true"
+  );
+
+  const response =
+    await fetch(
+      `${FACEBOOK_GRAPH}/${videoId}/thumbnails`,
+      {
+        method:
+          "POST",
+
+        headers: {
+          Authorization:
+            `Bearer ${pageToken}`
+        },
+
+        body:
+          form
+      }
+    );
+
+  const data =
+    await response
+      .json();
+
+  if (
+    !response.ok
+  ) {
+    const message =
+      (data as any)
+        ?.error
+        ?.message
+      ??
+      `Facebook thumbnail upload failed with HTTP ${response.status}`;
+
+    throw new Error(
+      message
+    );
+  }
+
+  return data;
+}
+
+
 // ======================================================
 // INSTAGRAM — EXISTING INSTAGRAM LOGIN AUTH
 // ======================================================
@@ -732,7 +894,7 @@ function createServer(
         "TBG Motors Social",
 
       version:
-        "1.9.0"
+        "1.9.1"
     });
 
 
@@ -4034,6 +4196,176 @@ function createServer(
             pageToken,
             `${FACEBOOK_PAGE_ID}/video_reels`,
             body
+          )
+        );
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // FACEBOOK — CUSTOM VIDEO / REEL THUMBNAIL
+  // ====================================================
+
+  server.registerTool(
+    "set_facebook_video_thumbnail",
+
+    {
+      description:
+        "FINAL MEDIA CHANGE. Set a custom preferred thumbnail/cover image for a TBG Motors Facebook video or Reel using Meta's Video Thumbnails API. Useful for the standard SOLD cover. Only use after explicit user approval.",
+
+      inputSchema: {
+        video_id:
+          z.string()
+            .min(1),
+
+        image_url:
+          z.string()
+            .url()
+      }
+    },
+
+    async ({
+      video_id,
+      image_url
+    }) => {
+      try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
+        return result(
+          await setFacebookPreferredThumbnailFromUrl(
+            env,
+            pageToken,
+            video_id,
+            image_url
+          )
+        );
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // FACEBOOK — DELETE POST / VIDEO / REEL
+  // ====================================================
+
+  server.registerTool(
+    "delete_facebook_content",
+
+    {
+      description:
+        "FINAL DESTRUCTIVE ACTION. Delete one TBG Motors Facebook post, video or Reel by its exact Meta object ID. Only use after explicit user approval.",
+
+      inputSchema: {
+        object_id:
+          z.string()
+            .min(1)
+      },
+
+      annotations: {
+        destructiveHint:
+          true
+      }
+    },
+
+    async ({
+      object_id
+    }) => {
+      try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
+        return result(
+          await graphDelete(
+            FACEBOOK_GRAPH,
+            pageToken,
+            object_id
+          )
+        );
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // INSTAGRAM — DELETE MEDIA
+  // ====================================================
+
+  server.registerTool(
+    "delete_instagram_media",
+
+    {
+      description:
+        "FINAL DESTRUCTIVE ACTION. Delete one Instagram post, carousel, Reel or Story by exact media ID. Requires the Meta instagram_manage_contents permission. Use api_mode=facebook_login for media created through Instagram API with Facebook Login. Only use after explicit user approval.",
+
+      inputSchema: {
+        media_id:
+          z.string()
+            .min(1),
+
+        api_mode:
+          z.enum([
+            "instagram_login",
+            "facebook_login"
+          ])
+          .optional()
+      },
+
+      annotations: {
+        destructiveHint:
+          true
+      }
+    },
+
+    async ({
+      media_id,
+      api_mode
+    }) => {
+      try {
+        if (
+          api_mode
+          ===
+          "facebook_login"
+        ) {
+          const token =
+            requireInstagramFacebookUserToken(
+              env
+            );
+
+          return result(
+            await graphDelete(
+              FACEBOOK_GRAPH,
+              token,
+              media_id
+            )
+          );
+        }
+
+        return result(
+          await graphDelete(
+            INSTAGRAM_GRAPH,
+            env.META_ACCESS_TOKEN,
+            media_id
           )
         );
 
