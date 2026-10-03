@@ -567,7 +567,7 @@ function createServer(
         "TBG Motors Social",
 
       version:
-        "1.5.0"
+        "1.6.0"
     });
 
 
@@ -2297,6 +2297,157 @@ function createServer(
 
 
   // ====================================================
+  // FACEBOOK — LIST ORDINARY VIDEOS
+  // ====================================================
+
+  server.registerTool(
+    "list_facebook_videos",
+
+    {
+      description:
+        "List recent ordinary videos published on the TBG Motors Facebook Page. Read-only. This is separate from Facebook Reels.",
+
+      inputSchema: {
+        limit:
+          z.number()
+            .int()
+            .min(1)
+            .max(25)
+            .optional()
+      },
+
+      annotations: {
+        readOnlyHint:
+          true
+      }
+    },
+
+    async ({
+      limit
+    }) => {
+      try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
+        return result(
+          await graphGet(
+            FACEBOOK_GRAPH,
+            pageToken,
+            `${FACEBOOK_PAGE_ID}/videos`,
+            {
+              fields:
+                "id,title,description,created_time,updated_time,permalink_url,status",
+
+              limit:
+                String(
+                  limit
+                  ??
+                  10
+                )
+            }
+          )
+        );
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
+  // FACEBOOK — ORDINARY VIDEO POST
+  // ====================================================
+
+  server.registerTool(
+    "publish_facebook_video",
+
+    {
+      description:
+        "FINAL PUBLICATION ACTION. Publish a public HTTPS video URL to the TBG Motors Facebook Page as an ordinary Facebook video post, not as a Reel. The source video is sent as-is; this tool does not crop, resize, mute, add music or otherwise edit the media. Only use after explicit user approval.",
+
+      inputSchema: {
+        video_url:
+          z.string()
+            .url(),
+
+        description:
+          z.string()
+            .optional(),
+
+        title:
+          z.string()
+            .optional()
+      },
+
+      annotations: {
+        readOnlyHint:
+          false,
+
+        destructiveHint:
+          false,
+
+        openWorldHint:
+          true
+      }
+    },
+
+    async ({
+      video_url,
+      description,
+      title
+    }) => {
+      try {
+        const pageToken =
+          await getFacebookPageAccessToken(
+            env
+          );
+
+        const form:
+          Record<
+            string,
+            string
+          > = {
+            file_url:
+              video_url,
+
+            published:
+              "true"
+          };
+
+        if (description) {
+          form.description =
+            description;
+        }
+
+        if (title) {
+          form.title =
+            title;
+        }
+
+        return result(
+          await graphPostForm(
+            FACEBOOK_GRAPH,
+            pageToken,
+            `${FACEBOOK_PAGE_ID}/videos`,
+            form
+          )
+        );
+
+      } catch (error) {
+        return errorResult(
+          error
+        );
+      }
+    }
+  );
+
+
+  // ====================================================
   // FACEBOOK — PREPARE PHOTO
   // ====================================================
 
@@ -2508,7 +2659,7 @@ function createServer(
 
     {
       description:
-        "Prepare and upload a Facebook Reel for TBG Motors from a public HTTPS video URL. This does NOT publish it.",
+        "Prepare and upload a Facebook Reel for TBG Motors from a public HTTPS video URL. This does NOT publish it. The Worker downloads the source and sends the video bytes directly to Meta's Reel upload endpoint, which is more reliable than asking Meta to fetch the hosted URL.",
 
       inputSchema: {
         video_url:
@@ -2553,6 +2704,41 @@ function createServer(
         }
 
 
+        const sourceResponse =
+          await fetch(
+            video_url,
+            {
+              method:
+                "GET"
+            }
+          );
+
+
+        if (
+          !sourceResponse.ok
+        ) {
+          throw new Error(
+            `Could not download Reel source video: HTTP ${sourceResponse.status}`
+          );
+        }
+
+
+        const videoBytes =
+          await sourceResponse
+            .arrayBuffer();
+
+
+        if (
+          videoBytes.byteLength
+          ===
+          0
+        ) {
+          throw new Error(
+            "The Reel source video is empty."
+          );
+        }
+
+
         const uploadResponse =
           await fetch(
             start.upload_url,
@@ -2564,29 +2750,70 @@ function createServer(
                 Authorization:
                   `OAuth ${pageToken}`,
 
-                file_url:
-                  video_url
-              }
+                offset:
+                  "0",
+
+                file_size:
+                  String(
+                    videoBytes.byteLength
+                  ),
+
+                "Content-Type":
+                  "application/octet-stream"
+              },
+
+              body:
+                videoBytes
             }
           );
 
 
-        const uploadData =
-          await uploadResponse.json();
+        const uploadText =
+          await uploadResponse
+            .text();
+
+
+        let uploadData:
+          any;
+
+        try {
+          uploadData =
+            uploadText
+              ?
+              JSON.parse(
+                uploadText
+              )
+              :
+              {};
+        } catch {
+          uploadData = {
+            raw:
+              uploadText
+          };
+        }
 
 
         if (
           !uploadResponse.ok
         ) {
-          const message =
-            (uploadData as any)
+          const metaMessage =
+            uploadData
               ?.error
               ?.message
             ??
-            `Facebook Reel upload failed with HTTP ${uploadResponse.status}`;
+            uploadData
+              ?.debug_info
+              ?.message
+            ??
+            uploadData
+              ?.message
+            ??
+            uploadText
+            ??
+            "Unknown upload error";
 
           throw new Error(
-            message
+            `Facebook Reel upload failed with HTTP ${uploadResponse.status}: ${metaMessage}`
           );
         }
 
@@ -2594,6 +2821,9 @@ function createServer(
         return result({
           video_id:
             start.video_id,
+
+          source_bytes:
+            videoBytes.byteLength,
 
           upload_result:
             uploadData
