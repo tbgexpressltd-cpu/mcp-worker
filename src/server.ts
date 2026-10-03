@@ -2122,7 +2122,7 @@ function createServer(
         "TBG Motors Social",
 
       version:
-        "2.0.1"
+        "2.0.2"
     });
 
 
@@ -5441,13 +5441,26 @@ function createServer(
         if (
           cover_url
         ) {
-          thumbnail =
-            await setFacebookPreferredThumbnailFromUrl(
-              env,
-              pageToken,
-              video_id,
-              cover_url
-            );
+          try {
+            thumbnail =
+              await setFacebookPreferredThumbnailFromUrl(
+                env,
+                pageToken,
+                video_id,
+                cover_url
+              );
+          } catch (
+            error
+          ) {
+            thumbnail = {
+              warning:
+                error instanceof Error
+                  ?
+                  error.message
+                  :
+                  "Reel published, but the custom Facebook thumbnail could not be applied."
+            };
+          }
         }
 
 
@@ -6058,7 +6071,7 @@ function createServer(
           "TBG Motors Social",
 
         version:
-          "2.0.1",
+          "2.0.2",
 
         features: {
           instagram: {
