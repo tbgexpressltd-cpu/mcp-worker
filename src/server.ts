@@ -49,6 +49,9 @@ const FACEBOOK_PAGE_ID =
 const PUBLIC_WORKER_BASE =
   "https://mcp-worker.tbgexpressltd.workers.dev";
 
+const TBG_SOLD_STAMP_KEY =
+  "1791033426610-12d3afff-b02e-4168-bccf-7aa38838f2ea-tbg-sold-stamp.png";
+
 
 // ======================================================
 // CHATGPT FILE INPUT
@@ -729,7 +732,7 @@ function createServer(
         "TBG Motors Social",
 
       version:
-        "1.8.0"
+        "1.8.1"
     });
 
 
@@ -1158,48 +1161,113 @@ function createServer(
 
 
         if (sold) {
-          const label =
+          if (
+            sold_text
+            &&
+            sold_text
+              .trim()
+              .toUpperCase()
+            !==
+            "SOLD"
+          ) {
+            throw new Error(
+              "The TBG Motors SOLD template uses the fixed text SOLD so every sold post stays visually consistent."
+            );
+          }
+
+
+          const stampObject =
+            await env
+              .SOCIAL_MEDIA
+              .get(
+                TBG_SOLD_STAMP_KEY
+              );
+
+
+          if (
+            !stampObject
+            ||
+            !("body" in stampObject)
+          ) {
+            throw new Error(
+              "The standard TBG Motors SOLD stamp asset is missing from R2."
+            );
+          }
+
+
+          // Standard TBG Motors SOLD layout:
+          // - exact same distressed red/white stamp asset every time
+          // - 46% of the final image width
+          // - horizontally centred
+          // - vertically centred in the Instagram/Facebook safe area
+          //
+          // Keeping these ratios fixed makes SOLD posts line up consistently
+          // in the Instagram profile grid and on Facebook.
+          const stampWidth =
+            Math.round(
+              targetWidth
+              *
+              0.46
+            );
+
+
+          const stampHeight =
+            Math.round(
+              stampWidth
+              *
+              584
+              /
+              1248
+            );
+
+
+          const stampLeft =
+            Math.round(
+              (
+                targetWidth
+                -
+                stampWidth
+              )
+              /
+              2
+            );
+
+
+          const stampTop =
+            Math.round(
+              targetHeight
+              *
+              0.50
+              -
+              stampHeight
+              /
+              2
+            );
+
+
+          const stamp =
             env
               .IMAGES
-              .text(
-                sold_text
-                ??
-                "SOLD",
-                {
-                  color:
-                    "#e10600",
-                  size:
-                    Math.max(
-                      72,
-                      Math.round(
-                        targetWidth
-                        *
-                        0.18
-                      )
-                    )
-                }
-              );
+              .input(
+                stampObject.body
+              )
+              .transform({
+                width:
+                  stampWidth
+              });
 
 
           pipeline =
             pipeline
               .draw(
-                label,
+                stamp,
                 {
                   top:
-                    Math.round(
-                      targetHeight
-                      *
-                      0.38
-                    ),
+                    stampTop,
                   left:
-                    Math.round(
-                      targetWidth
-                      *
-                      0.18
-                    ),
+                    stampLeft,
                   opacity:
-                    0.96
+                    0.98
                 }
               );
         }
