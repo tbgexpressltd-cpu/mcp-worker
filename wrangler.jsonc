@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "mcp-worker",
-  "compatibility_date": "2026-06-11",
+  "compatibility_date": "2026-10-03",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
 
@@ -18,6 +18,34 @@
 
   "media": {
     "binding": "MEDIA"
+  },
+
+  "containers": [
+    {
+      "class_name": "VideoProcessor",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "base": {
+          "dockerfile": "./Dockerfile.media"
+        }
+      }
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "VIDEO_PROCESSOR",
+        "class_name": "VideoProcessor"
+      }
+    ]
+  },
+
+  "exports": {
+    "VideoProcessor": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
   },
 
   "assets": {
